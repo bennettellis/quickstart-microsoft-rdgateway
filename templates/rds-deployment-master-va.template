@@ -1,0 +1,556 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template is intended to be installed into an existing VPC with two private subnets
+  and an Active Directory domain. It will create auto-scaling groups with Remote Desktop Services
+  instances in the private VPC subnets. **WARNING** This template creates Amazon EC2
+  Windows instance and related resources. You will be billed for the AWS resources
+  used if you create a stack from this template. QS(0006)
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VPCID
+          - PrivateSubnetIDs
+          - PublicSubnetIDs
+          - AllowedCIDR
+      - Label:
+          default: Amazon EC2 Configuration
+        Parameters:
+          - KeyPairName
+          - RDSInstanceType
+          - LatestAmiId
+      - Label:
+          default: Microsoft Active Directory Configuration
+        Parameters:
+          - DomainDNSName
+          - DomainNetBIOSName
+          - DomainOUPath
+          - UserNameSecretName
+          - PasswordSecretName
+      - Label:
+          default: RDS Connection Broker Configuration
+        Parameters:
+          - RDConnectionBrokerDesiredNumberOfInstances
+          - RDConnectionBrokerCertSecretName
+          - RDConnectionBrokerCertCN
+          - RDConnectionBrokerCertPassword
+      - Label:
+          default: RDS Connection Broker HA Configuration
+        Parameters:
+          - SqlServerInstanceName
+          - DatabaseUsername
+          - DatabasePassword
+          - DBEngine
+      - Label:
+          default: RDS License Server Configuration
+        Parameters:
+          - RDLicenseDesiredNumberOfInstances
+          - RDLicenseCertSecretName
+          - RDLicenseCertCN
+          - RDLicenseCertPassword
+      - Label:
+          default: RDS Gateway Server Configuration
+        Parameters:
+          - RDGatewayDesiredNumberOfInstances
+          - RDGatewayCertSecretName
+          - RDGatewayCertCN
+          - RDGatewayCertPassword
+      - Label:
+          default: RDS RDWeb Server Configuration
+        Parameters:
+          - RDWebDesiredNumberOfInstances
+          - RDWebCertSecretName
+          - RDWebCertCN
+          - RDWebCertPassword
+      - Label:
+          default: Notifications
+        Parameters:
+          - OperatorEMail
+      - Label:
+          default: Solution Source File Configuration
+        Parameters:
+          - S3BucketName
+          - S3KeyPrefix
+          - S3BucketRegion
+    ParameterLabels:
+      # Network Configuration
+      VPCID:
+        default: VPC ID
+      PrivateSubnetIDs:
+        default: Private Subnet IDs for Remote Desktop Services Components
+      PublicSubnetIDs:
+        default: Public Subnet IDs for Load Balancers
+      AllowedCIDR:
+        default: Allowed Remote Desktop Services Access CIDR
+      # AWS Ec2 Configuration
+      KeyPairName:
+        default: Key Pair Name
+      LatestAmiId:
+        default: SSM Parameter to Grab Latest AMI ID
+      RDSInstanceType:
+        default: Remote Desktop Services Instance Type (all are created the same)
+      # ACtive Directory Configuration
+      DomainDNSName:
+        default: Domain DNS Name
+      DomainNetBIOSName:
+        default: Domain NetBIOS Name
+      DomainOUPath:
+        default: Domain OU Path
+      UserNameSecretName:
+        default: ARN of the secret containing domains service account name
+      PasswordSecretName:
+        Description: ARN of the secret containing domains service account password
+      # RDS Connection Broker Config
+      RDConnectionBrokerDesiredNumberOfInstances:
+        default: Desired Number of Instances
+      RDConnectionBrokerCertSecretName:
+        default: Secret Id for pfx certificate for RD Connection Broker Components
+      RDConnectionBrokerCertCN:
+        default: CN (Common Name) of the TLS Certificate in the PFX File.
+      RDConnectionBrokerCertPassword:
+        default: PFX file password (if required)
+      # RDS Connection Broker HA Config
+      SqlServerInstanceName:
+        default: Name for SQL Server Instance
+      DatabaseUsername:
+        default: Username for SQL Server Instance
+      DatabasePassword:
+        default: Password for SQL Server Username
+      DBEngine:
+        default: SQL Server Engine
+      # RDS License Server Config
+      RDLicenseDesiredNumberOfInstances:
+        default: Desired Number of Instances
+      RDLicenseCertSecretName:
+        default: Secret Id for pfx certificate for RD License Components
+      RDLicenseCertCN:
+        default: CN (Common Name) of the TLS Certificate in the PFX File.
+      RDLicenseCertPassword:
+        default: PFX file password (if required)
+      # RDS Gateway Server Config
+      RDGatewayDesiredNumberOfInstances:
+        default: Desired Number of Instances
+      RDGatewayCertSecretName:
+        default: Secret Id for pfx certificate for RD Gateway Components
+      RDGatewayCertCN:
+        default: CN (Common Name) of the TLS Certificate in the PFX File.
+      RDGatewayCertPassword:
+        default: PFX file password (if required)
+      # RDS RDWeb Server Config
+      RDWebDesiredNumberOfInstances:
+        default: Desired Number of Instances
+      RDWebCertSecretName:
+        default: Secret Id for pfx certificate for RD Web Components
+      RDWebCertCN:
+        default: CN (Common Name) of the TLS Certificate in the PFX File.
+      RDWebCertPassword:
+        default: PFX file password (if required)
+      # Solution Source File Config
+      S3BucketName:
+        default: Solution S3 Bucket Name
+      S3KeyPrefix:
+        default: Solution S3 Key Prefix
+      S3BucketRegion:
+        default: Solution S3 bucket region
+      # Operations
+      OperatorEMail:
+        default: Email to Notify of Scaling Operations
+Parameters:
+  # Network Configuration
+  VPCID:
+    Description: ID of the VPC (e.g., vpc-0343606e)
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIDs:
+    Description: IDs of the private subnets that you want to provision the Remove Dekstop Services into
+    Type: List<AWS::EC2::Subnet::Id>
+  PublicSubnetIDs:
+    Description: IDs of the public subnets that you want to provision the load balancers into
+    Type: List<AWS::EC2::Subnet::Id>
+  AllowedCIDR:
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    Description: Allowed CIDR Block for access to the Remote Desktop Services Servers
+    Type: String
+    Default: 0.0.0.0/0
+  # AWS Ec2 Config
+  KeyPairName:
+    Description: Public/private key pairs allow you to securely connect to your instance
+      after it launches
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: workspace-test
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /vaec/ec2/windows-ami
+  RDSInstanceType:
+    Description: Amazon EC2 instance type for the Remote Desktop Services instances
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.small
+      - t2.medium
+      - t2.large
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+  # MS Active Directory Config
+  DomainDNSName:
+    Description: Fully qualified domain name (FQDN) e.g. example.com
+    Type: String
+    MinLength: '2'
+    MaxLength: '255'
+    Default: va.gov
+    AllowedPattern: '[a-zA-Z0-9\-]+\..+'
+  DomainNetBIOSName:
+    AllowedPattern: '[a-zA-Z0-9\-]+'
+    Description: NetBIOS name of the domain (up to 15 characters) for users of earlier
+      versions of Windows e.g. EXAMPLE
+    MaxLength: '15'
+    MinLength: '1'
+    Type: String
+    Default: va
+  DomainOUPath:
+    Description: OU path of the domain
+    Type: String
+    Default: OU=DEV,OU=ECS,OU=Servers,OU=AWS,OU=VAEC,DC=va,DC=gov
+  # DomainMemberSGID:
+  #   Description: ID of the Domain Member Security Group (e.g., sg-7f16e910)
+  #   Type: AWS::EC2::SecurityGroup::Id
+  UserNameSecretName:
+    Description: Name of the secret that contains the name of the service account
+    Type: String
+    Default: /vaec/workspaces/domains/va.gov/service_account_name
+  PasswordSecretName:
+    Description: Name of the secret that contains the password of the service account
+    Type: String
+    Default: /vaec/workspaces/domains/va.gov/service_account_name_p
+  # RDS Connection Broker Config
+  RDConnectionBrokerDesiredNumberOfInstances:
+    AllowedValues: ['1','2','3','4','5','6','7','8','9','10']
+    Default: '2'
+    Description: Enter the number of instances to create
+    Type: String
+  RDConnectionBrokerCertSecretName:
+    Description: >-
+      ID for Secret that contains base64 encoded version of pfx file that contains the certificate information for the
+      remote desktop service you are deploying. The cert's CN must match the CertCN parameter to operate correctly.
+    Type: String
+    Default: /vaec/workspaces/dev/workspaces-dev.dsk.vaec.va.gov.pfx.base64
+  RDConnectionBrokerCertCN:
+    Description: Comman Name specified in the TLS Certificate. Certificate should be for the main entry point to the solution fronted by the Load Balancer.
+    Type: String
+    Default: workspaces-dev.dsk.vaec.va.gov
+  RDConnectionBrokerCertPassword:
+    Type: String
+    Description: If your cert PFX file is password protected, enter the password
+    Default: ""
+    NoEcho: true
+  # RDS Connection Broker HA Database Config
+  SqlServerInstanceName:
+    Description: Name for SQL Server Instance
+    Type: String
+    MinLength: '1'
+    MaxLength: '63'
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    Default: rdcbrokersql
+  DatabaseUsername:
+    AllowedPattern: "[a-zA-Z0-9]+"
+    ConstraintDescription: DBAdmin
+    Description: Database Admin Account User Name
+    MaxLength: '16'
+    MinLength: '1'
+    Type: String
+    Default: rdbrokeradmin
+  DatabasePassword:
+    AllowedPattern: "^(?=.*[0-9])(?=.*[a-zA-Z])([a-zA-Z0-9]+)"
+    ConstraintDescription: Must contain only alphanumeric characters with at least one capital letter and one number.
+    Description: The database admin account password.
+    MaxLength: '41'
+    MinLength: '6'
+    NoEcho: 'true'
+    Type: String
+  DBEngine:
+    Description: Select Database Engine
+    Type: String
+    Default: sqlserver-ex
+    AllowedValues: [sqlserver-ee,sqlserver-se,sqlserver-ex]
+  # RDS License Server Config
+#  RDLicenseDesiredNumberOfInstances:
+#    AllowedValues: ['1','2','3','4','5','6','7','8','9','10']
+#    Default: '2'
+#    Description: Enter the number of instances to create
+#    Type: String
+#  RDLicenseCertSecretName:
+#    Description: >-
+#      ID for Secret that contains base64 encoded version of pfx file that contains the certificate information for the
+#      remote desktop service you are deploying. The cert's CN must match the CertCN parameter to operate correctly.
+#    Type: String
+#  RDLicenseCertCN:
+#    Description: Comman Name specified in the TLS Certificate. Certificate should be for the main entry point to the solution fronted by the Load Balancer.
+#    Type: String
+#  RDLicenseCertPassword:
+#    Type: String
+#    Description: If your cert PFX file is password protected, enter the password
+#    Default: ""
+#    NoEcho: true
+  # RDS Gateway Server Config
+  RDGatewayDesiredNumberOfInstances:
+    AllowedValues: ['1','2','3','4','5','6','7','8','9','10']
+    Default: '2'
+    Description: Enter the number of instances to create
+    Type: String
+  RDGatewayCertSecretName:
+    Description: >-
+      ID for Secret that contains base64 encoded version of pfx file that contains the certificate information for the
+      remote desktop service you are deploying. The cert's CN must match the CertCN parameter to operate correctly.
+    Type: String
+    Default: /vaec/workspaces/dev/workspaces-dev.dsk.vaec.va.gov.pfx.base64
+  RDGatewayCertCN:
+    Description: Comman Name specified in the TLS Certificate. Certificate should be for the main entry point to the solution fronted by the Load Balancer.
+    Type: String
+    Default: workspaces-dev.dsk.vaec.va.gov
+  RDGatewayCertPassword:
+    Type: String
+    Description: If your cert PFX file is password protected, enter the password
+    Default: ""
+    NoEcho: true
+  # RDS RDWeb Server Config
+  RDWebDesiredNumberOfInstances:
+    AllowedValues: ['1','2','3','4','5','6','7','8','9','10']
+    Default: '2'
+    Description: Enter the number of Remote Desktop Gateway hosts to create
+    Type: String
+  RDWebCertSecretName:
+    Description: >-
+      ID for Secret that contains base64 encoded version of pfx file that contains the certificate information for the
+      remote desktop service you are deploying. The cert's CN must match the CertCN parameter to operate correctly.
+    Type: String
+    Default: /vaec/workspaces/dev/workspaces-dev.dsk.vaec.va.gov.pfx.base64
+  RDWebCertCN:
+    Description: Comman Name specified in the TLS Certificate. Certificate should be for the main entry point to the solution fronted by the Load Balancer.
+    Type: String
+    Default: workspaces-dev.dsk.vaec.va.gov
+  RDWebCertPassword:
+    Type: String
+    Description: If your cert PFX file is password protected, enter the password
+    Default: ""
+    NoEcho: true
+  # Solution Source File Config
+  S3BucketName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
+    ConstraintDescription: Solution bucket name can include numbers, lowercase
+      letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen
+      (-).
+    Description: S3 bucket name for the Solution assets. Solution bucket name
+      can include numbers, lowercase letters, uppercase letters, and hyphens (-).
+      It cannot start or end with a hyphen (-).
+    Type: String
+    Default: bootstrap-automation-us-gov-west-1-669130532365
+  S3KeyPrefix:
+    AllowedPattern: ^[0-9a-zA-Z-/]*$
+    ConstraintDescription: Solution key prefix can include numbers, lowercase letters,
+      uppercase letters, hyphens (-), and forward slash (/).
+    Default: iac/quickstart-microsoft-rdgateway/
+    Description: S3 key prefix for the Solution assets. Solution key prefix
+      can include numbers, lowercase letters, uppercase letters, hyphens (-), and
+      forward slash (/).
+    Type: String
+  S3BucketRegion:
+    Description: "The AWS Region where the S3 bucket (S3BucketName) is hosted. When using your own bucket, you must specify this value."
+    Type: String
+    Default: us-gov-west-1
+  OperatorEMail:
+    Description: EMail address to notify if there are any scaling operations for components
+    Type: String
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+    Default: pradeep.mysore@va.gov
+  # NOT USED???
+  DomainID:
+    Description: "AD Connector Directory ID"
+    Type: String
+Rules:
+  SubnetsInVPC:
+    Assertions:
+      - Assert: !EachMemberIn
+          - !ValueOfAll
+            - AWS::EC2::Subnet::Id
+            - VpcId
+          - !RefAll 'AWS::EC2::VPC::Id'
+        AssertDescription: All subnets must be in the same VPC
+  CheckSupportedInstances:
+    RuleCondition: !Contains
+      - - m4.large
+        - m4.xlarge
+        - m4.2xlarge
+        - m4.4xlarge
+      - !Ref 'RDSInstanceType'
+    Assertions:
+      - Assert: !Not
+          - !Contains
+            - - eu-west-3
+            - !Ref 'AWS::Region'
+        AssertDescription: M4 instances are not available in the Paris region
+Conditions:
+  UsingDefaultBucket: !Equals [!Ref S3BucketName, 'aws-quickstart']
+  GovCloudCondition: !Equals
+    - !Ref 'AWS::Region'
+    - us-gov-west-1
+Resources:
+  RemoteDesktopComponentsNotifications:
+    Type: AWS::CloudFormation::Stack
+    #    DependsOn:
+    Properties:
+      Parameters:
+        OperatorEMail: !Ref OperatorEMail
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-notification.template"
+      TimeoutInMinutes: 30
+  RemoteDesktopComponentsRole:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        S3BucketRegion: !Ref S3BucketRegion
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-host-role.template"
+      TimeoutInMinutes: 30
+  RemoteDesktopComponentsHASQLDB:
+    Type: AWS::CloudFormation::Stack
+    #    DependsOn:
+    Properties:
+      Parameters:
+        VPCID: !Ref VPCID
+        DBSubnetIDs:
+          "Fn::Join": [",", !Ref PrivateSubnetIDs]
+        SqlServerInstanceName: !Ref SqlServerInstanceName
+        DatabaseUsername: !Ref DatabaseUsername
+        DatabasePassword: !Ref DatabasePassword
+        DBEngine: !Ref DBEngine
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-hadb-sqlserver.template"
+      TimeoutInMinutes: 30
+  RemoteDesktopConnectionBrokers:
+    Type: AWS::CloudFormation::Stack
+    #    DependsOn:
+    Properties:
+      Parameters:
+        DomainDNSName: !Ref DomainDNSName
+        DomainOUPath: !Ref DomainOUPath
+        DomainNetBIOSName: !Ref DomainNetBIOSName
+        KeyPairName: !Ref KeyPairName
+        LatestAmiId: !Ref LatestAmiId
+        DesiredNumberOfHosts: !Ref RDConnectionBrokerDesiredNumberOfInstances
+        PrivateSubnetIDs:
+          "Fn::Join": [",", !Ref PrivateSubnetIDs]
+        RDSInstanceType: !Ref RDSInstanceType
+        AllowedCIDR: !Ref AllowedCIDR
+        VPCID: !Ref VPCID
+        DomainID: !Ref DomainID
+        CertSecretName: !Ref RDConnectionBrokerCertSecretName
+        CertCN: !Ref RDConnectionBrokerCertCN
+        CertPassword: !Ref RDConnectionBrokerCertPassword
+        UserNameSecretName: !Ref UserNameSecretName
+        PasswordSecretName: !Ref PasswordSecretName
+        SqlServerInstanceName: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerInstanceName]
+        SqlServerPort: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerPort]
+        RDComponentToDeploy: RDS-Connection-Broker
+        SNSNotificationTopicArn: !GetAtt [RemoteDesktopComponentsNotifications, Outputs.NotificationTopicArn]
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        S3BucketRegion: !Ref S3BucketRegion
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-component.template"
+      TimeoutInMinutes: 30
+  RemoteDesktopGatewways:
+    Type: AWS::CloudFormation::Stack
+    #    DependsOn:
+    Properties:
+      Parameters:
+        DomainDNSName: !Ref DomainDNSName
+        DomainOUPath: !Ref DomainOUPath
+        DomainNetBIOSName: !Ref DomainNetBIOSName
+        KeyPairName: !Ref KeyPairName
+        LatestAmiId: !Ref LatestAmiId
+        DesiredNumberOfHosts: !Ref RDConnectionBrokerDesiredNumberOfInstances
+        PrivateSubnetIDs:
+          "Fn::Join": [",", !Ref PrivateSubnetIDs]
+        RDSInstanceType: !Ref RDSInstanceType
+        AllowedCIDR: !Ref AllowedCIDR
+        VPCID: !Ref VPCID
+        DomainID: !Ref DomainID
+        CertSecretName: !Ref RDConnectionBrokerCertSecretName
+        CertCN: !Ref RDConnectionBrokerCertCN
+        CertPassword: !Ref RDConnectionBrokerCertPassword
+        UserNameSecretName: !Ref UserNameSecretName
+        PasswordSecretName: !Ref PasswordSecretName
+        SqlServerInstanceName: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerInstanceName]
+        SqlServerPort: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerPort]
+        RDComponentToDeploy: RDS-Gateway
+        SNSNotificationTopicArn: !GetAtt [RemoteDesktopComponentsNotifications, Outputs.NotificationTopicArn]
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        S3BucketRegion: !Ref S3BucketRegion
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-component.template"
+      TimeoutInMinutes: 30
+#  RemoteDesktopLicenseServers:
+#    Type: AWS::CloudFormation::Stack
+#    #    DependsOn:
+#    Properties:
+#      Parameters:
+#        DomainDNSName: !Ref DomainDNSName
+#        DomainOUPath: !Ref DomainOUPath
+#        DomainNetBIOSName: !Ref DomainNetBIOSName
+#        KeyPairName: !Ref KeyPairName
+#        LatestAmiId: !Ref LatestAmiId
+#        DesiredNumberOfHosts: !Ref RDConnectionBrokerDesiredNumberOfInstances
+#        PrivateSubnetIDs:
+#          "Fn::Join": [",", !Ref PrivateSubnetIDs]
+#        RDSInstanceType: !Ref RDSInstanceType
+#        AllowedCIDR: !Ref AllowedCIDR
+#        VPCID: !Ref VPCID
+#        DomainID: !Ref DomainID
+#        CertSecretName: !Ref RDConnectionBrokerCertSecretName
+#        CertCN: !Ref RDConnectionBrokerCertCN
+#        CertPassword: !Ref RDConnectionBrokerCertPassword
+#        UserNameSecretName: !Ref UserNameSecretName
+#        PasswordSecretName: !Ref PasswordSecretName
+#        SqlServerInstanceName: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerInstanceName]
+#        SqlServerPort: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerPort]
+#        RDComponentToDeploy: RDS-Licensing
+#        SNSNotificationTopicArn: !GetAtt [RemoteDesktopComponentsNotifications, Outputs.NotificationTopicArn]
+#        S3BucketName: !Ref S3BucketName
+#        S3KeyPrefix: !Ref S3KeyPrefix
+#        S3BucketRegion: !Ref S3BucketRegion
+#      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-component.template"
+#      TimeoutInMinutes: 30
+  RemoteDesktopWebServers:
+    Type: AWS::CloudFormation::Stack
+    #    DependsOn:
+    Properties:
+      Parameters:
+        DomainDNSName: !Ref DomainDNSName
+        DomainOUPath: !Ref DomainOUPath
+        DomainNetBIOSName: !Ref DomainNetBIOSName
+        KeyPairName: !Ref KeyPairName
+        LatestAmiId: !Ref LatestAmiId
+        DesiredNumberOfHosts: !Ref RDConnectionBrokerDesiredNumberOfInstances
+        PrivateSubnetIDs:
+          "Fn::Join": [",", !Ref PrivateSubnetIDs]
+        RDSInstanceType: !Ref RDSInstanceType
+        AllowedCIDR: !Ref AllowedCIDR
+        VPCID: !Ref VPCID
+        DomainID: !Ref DomainID
+        CertSecretName: !Ref RDConnectionBrokerCertSecretName
+        CertCN: !Ref RDConnectionBrokerCertCN
+        CertPassword: !Ref RDConnectionBrokerCertPassword
+        UserNameSecretName: !Ref UserNameSecretName
+        PasswordSecretName: !Ref PasswordSecretName
+        SqlServerInstanceName: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerInstanceName]
+        SqlServerPort: !GetAtt [RemoteDesktopComponentsHASQLDB, Outputs.SqlServerPort]
+        RDComponentToDeploy: RDS-Web-Access
+        SNSNotificationTopicArn: !GetAtt [RemoteDesktopComponentsNotifications, Outputs.NotificationTopicArn]
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        S3BucketRegion: !Ref S3BucketRegion
+      TemplateURL: !Sub "https://${S3BucketName}.s3.${S3BucketRegion}.${AWS::URLSuffix}/${S3KeyPrefix}templates/rd-component.template"
+      TimeoutInMinutes: 30

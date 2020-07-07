@@ -16,9 +16,9 @@ param (
 try {
     $ErrorActionPreference = "Stop"
 
-    Start-Transcript -Path c:\cfn\log\Initialize-RDGW.ps1.txt -Append
+    Start-Transcript -Path c:\cfn\log\Initialize-RDGW.log -Append
 
-    Import-Module remotedesktopservices
+    Import-Module RemoteDesktopServices
 
     $name = new-object -com "X509Enrollment.CX500DistinguishedName.1"
     $name.Encode("CN=$ServerFQDN", 0)
@@ -60,7 +60,7 @@ try {
 
     dir cert:\localmachine\my | where-object { $_.Subject -eq "CN=$ServerFQDN" } | ForEach-Object { Set-Item -Path RDS:\GatewayServer\SSLCertificate\Thumbprint -Value $_.Thumbprint }
 
-    Restart-Service tsgateway
+    Restart-Service TSGateway
 }
 catch {
     Write-Verbose "$($_.exception.message)@ $(Get-Date)"

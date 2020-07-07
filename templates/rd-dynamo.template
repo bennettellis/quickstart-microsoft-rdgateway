@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates database for Remote Desktop Services component management
+Resources:
+  RDSComponentManagementTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: RDSComponentManagement
+      AttributeDefinitions:
+        -
+          AttributeName: "InstanceId"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "InstanceId"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+Outputs:
+  RDSComponentManagementDDB:
+    Description: ARN for DDB to be ref'ed by other stacks.
+    Value: !GetAtt RDSComponentManagementTable.Arn
+    Export:
+      Name: RDSComponentManagementDDB
+  RDSComponentManagementDDBTableName:
+    Description: TableName for DDB to be ref'ed by other stacks.
+    Value: !Ref RDSComponentManagementTable
+    Export:
+      Name: RDSComponentManagementDDBTableName

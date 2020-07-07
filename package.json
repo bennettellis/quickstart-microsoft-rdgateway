@@ -1,0 +1,8 @@
+{
+  "name": "quickstart-microsoft-rdgateway",
+  "version": "1.0.0",
+  "dependencies": {},
+  "devDependencies": {
+    "aws-sdk": "^2.709.0"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "c:\\cfn\\log\\cfn-init.LOG",
+            "log_group_name": "aws/ec2/{instance_id}",
+            "log_stream_name": "cfn-init.LOG"
+          },
+          {
+            "file_path": "c:\\ProgramData\\Amazon\\EC2-Windows\\Launch\\Log\\Ec2Launch.LOG",
+            "log_group_name": "aws/ec2/{instance_id}",
+            "log_stream_name": "Ec2Launch.LOG"
+          },
+          {
+            "file_path": "c:\\ProgramData\\Amazon\\EC2-Windows\\Launch\\Log\\UserdataExecution.LOG",
+            "log_group_name": "aws/ec2/{instance_id}",
+            "log_stream_name": "UserdataExecution.LOG"
+          }
+        ]
+      }
+    }
+  }
+}

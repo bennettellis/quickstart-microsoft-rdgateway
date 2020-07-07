@@ -376,7 +376,7 @@ Resources:
             a-install-rds:
               command: !Join
                 - ''
-                - - powershell.exe "Install-WindowsFeature RDS-Gateway,RSAT-RDS-Gateway"
+                - - powershell.exe -Command "Install-WindowsFeature RDS-Gateway,RSAT-RDS-Gateway -IncludeManagementTools"
               waitAfterCompletion: '0'
             b-create-admin:
               command: !Join

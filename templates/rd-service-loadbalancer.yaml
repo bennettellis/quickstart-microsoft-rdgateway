@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+Properties:
+
+Resources:
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      #GroupName: !Sub ${AWS::StackName}-elb-${pUniqueTimestampHash}-sg
+      GroupDescription: 'Port access rules for the Remote Desktop Web Access Application LoadBalancer'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+        - FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPCID
+
+  RemoteDesktopServiceALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      #Name: !Sub ${AWS::StackName}-app-lb
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSG
+      Scheme: internal
+      Subnets: !Ref PrivateSubnetIDs
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref RemoteDesktopServiceALB
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref CertificateSecretId
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+  NLBLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      #Name: !Join ['', [!Ref ServiceName, LoadBalancer]]
+      # "internal" is also an option
+      #Scheme: internet-facing
+      Scheme: internal
+      Type: network
+      Subnets: !Ref PrivateSubnetIDs
+  NLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 443
+      Protocol: TCP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300
+      TargetType: ip
+      VpcId: !Ref VPCID
+  NLBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref NLBTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref NLBLoadBalancer
+      Port: !Ref LoadBalancerPort
+      Protocol: TCP
+
+      Port: 443
+      # Protocol: HTTP
+  NLBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref NLBTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref NLBLoadBalancer
+      Port: 80
+      Protocol: TCP

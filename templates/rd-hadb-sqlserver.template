@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template is intended to be installed into an existing VPC with two private subnets
+  and an Active Directory domain. It will create auto-scaling groups with Remote Desktop Services
+  instances in the private VPC subnets. **WARNING** This template creates Amazon EC2
+  Windows instance and related resources. You will be billed for the AWS resources
+  used if you create a stack from this template. QS(0006)
+Parameters:
+  VPCID:
+    Description: ID of the VPC (e.g., vpc-0343606e)
+    Type: AWS::EC2::VPC::Id
+    #TODO: REMOVE THIS
+    Default: vpc-057dfad899f784793
+  DBSubnetIDs:
+    Description: Database Subnet ID
+    Type: List<AWS::EC2::Subnet::Id>
+  SqlServerInstanceName:
+    Description: RDS SQL Server Instance Name
+    Type: String
+    Default: MyAppInstance
+    MinLength: '1'
+    MaxLength: '63'
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+#If SQL RDS needs to Active Directory Integrated then uncomment following parameter.
+#  DomainID:
+#    #Default: 'us-east-1'
+#    Default: 'd-xxxxxxxx'
+#    Description: "AD Connector Director ID"
+#    Type: String
+  DatabaseUsername:
+    AllowedPattern: "[a-zA-Z0-9]+"
+    ConstraintDescription: DBAdmin
+    Description: Database Admin Account User Name
+    MaxLength: '16'
+    MinLength: '1'
+    Type: String
+    Default: DBAdmin
+  DatabasePassword:
+    AllowedPattern: "^(?=.*[0-9])(?=.*[a-zA-Z])([a-zA-Z0-9]+)"
+    ConstraintDescription: Must contain only alphanumeric characters with at least one capital letter and one number.
+    Description: The database admin account password.
+    MaxLength: '41'
+    MinLength: '6'
+    NoEcho: 'true'
+    Type: String
+  DBEngine:
+    Description: Select Database Engine
+    Type: String
+    Default: sqlserver-ex
+    AllowedValues: [sqlserver-ee,sqlserver-se,sqlserver-ex]
+Resources:
+#  MSSQLServerDomainPolicy:
+#      Type: AWS::IAM::ManagedPolicy
+#      Properties:
+#        # MUST HAVE - Policy name begins with "project-"
+#        # MUST HAVE for mult-region - Stack name starts with "project-"
+#        # Auto-assigned name = <stack-name>-<resourcename>-<random>
+#        # Example Auto assigned name = project-s3-role-example-rS3Policy-1ST3R7IYC9JJ5
+#        Description: MS-SQL server doamin policy
+#        # MUST HAVE - Policy document Path: /project/
+#        Path: /
+#        #TODO: Reinstate VAEC Setting
+#        #Path: /vaec/
+#        PolicyDocument:
+#          Version: 2012-10-17
+#          Statement:
+#            - Sid: AllowSSMReadAccess
+#              Effect: Allow
+#              Action:
+#              - ds:DescribeDirectories
+#              - ds:AuthorizeApplication
+#              - ds:UnauthorizeApplication
+#              - ds:GetAuthorizedApplicationDetails
+#              Resource: "*"
+#  MSSQLServerDomainRole:
+#    Type: AWS::IAM::Role
+#    Properties:
+#      ManagedPolicyArns:
+#        - !Ref MSSQLServerDomainPolicy
+#      AssumeRolePolicyDocument:
+#        Statement:
+#          - Action:
+#              - sts:AssumeRole
+#            Principal:
+#              Service:
+#                - rds.amazonaws.com
+#            Effect: Allow
+#        Version: '2012-10-17'
+  SqlDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Ref SqlServerInstanceName
+      LicenseModel: license-included
+      Engine: !Ref DBEngine
+      EngineVersion: 14.00.3281.6.v1
+      #DBInstanceClass: db.t3.xlarge
+      DBInstanceClass: db.t2.medium
+      AllocatedStorage: '50'
+      MasterUsername: !Ref DatabaseUsername
+      MasterUserPassword: !Ref DatabasePassword
+      PubliclyAccessible: false
+      BackupRetentionPeriod: '1'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      StorageEncrypted: false
+      StorageType: standard
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      #If SQL RDS needs to Active Directory Integrated then uncomment following parameter.
+      #Domain: !Ref DomainID
+      #IAM role is mandate for AD integration
+      #DomainIAMRoleName: !Ref MSSQLServerDomainRole
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DBSubnetGroup
+      SubnetIds: !Ref DBSubnetIDs
+  # Database security group
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'MS SQL server Security Group'
+      SecurityGroupIngress:
+        - FromPort: 135
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+          ToPort: 135
+        - FromPort: 1433
+          ToPort: 1433
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPCID
+Outputs:
+  SqlServerInstanceName:
+    Description: Database endpoint
+    Value: !GetAtt SqlDatabase.Endpoint.Address
+    Export:
+      Name: SqlServerInstanceName
+  SqlServerPort:
+    Description: Database endpoint
+    Value: !GetAtt SqlDatabase.Endpoint.Port
+    Export:
+      Name: SqlServerPort

@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Deploys Remote Desktop Deployment Manager and associated objects
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+#      - Label:
+#          default: Directory Information
+#        Parameters:
+#          - UsernameSecretName
+#          - PasswordSecretName
+#      - Label:
+#          default: RDS Deployment Information. (EXISTING RDS Deployment to manage)
+#        Parameters:
+#          - RDGatewayASG
+#          - RDWebASG
+#          - RDConnectionBrokerASG
+      - Label:
+          default: Input Source
+        Parameters:
+          - SNSTopic
+#          - SQSQueueUri
+      - Label:
+          default: Lambda Details
+        Parameters:
+          - RDSConnectionBrokerAutoScalingGroupName
+          - RDSGatewayAutoScalingGroupName
+          - RDSWebAutoScalingGroupName
+          - RDSComponentManagementDDBTableName
+          - LambdaCodeS3Bucket
+          - LambdaCodeFilePath
+#          - WorkspaceAutomationVPC
+#          - Subnets
+Parameters:
+#  UsernameSecretName:
+#    Type: String
+#    Description: The name of the secret that contains the username part of the user manage the RDS Deployment with
+#  PasswordSecretName:
+#    Type: String
+#    Description: The name of the secret that contains the password part of the user manage the RDS Deployment with
+#  RDGatewayASG:
+#    Type: String
+#    Description: The AutoScalingGroup for your RD Gateway components in the RDS deployment
+#  RDWebASG:
+#    Type: String
+#    Description: The AutoScalingGroup for your RD Web components in the RDS deployment
+#  RDConnectionBrokerASG:
+#    Type: String
+#    Description: The AutoScalingGroup for your RD Connection Broker components in the RDS deployment
+#  SQSQueueArn:
+#    Type: String
+#    Description: The ARN of the SQS Queue that this Lambda solution will trigger from
+  SNSTopic:
+    Type: String
+    Description: The ARN of the SNS Topic
+  RDSComponentManagementDDBTableName:
+    Type: String
+    Description: The Nmae of the table to use to track RDS Components
+    Default: RDSComponentManagement
+  RDSConnectionBrokerAutoScalingGroupName:
+    Type: String
+    Description: The name of the RDS Connection Broker AutoScalingGroup
+  RDSGatewayAutoScalingGroupName:
+    Type: String
+    Description: The name of the RDS Gateway AutoScalingGroup
+  RDSWebAutoScalingGroupName:
+    Type: String
+    Description: The name of the RDS Web Access AutoScalingGroup
+  LambdaCodeFilePath:
+    Description: Path and filename of the zip file that represents the Lambda function. Do not include leading /
+    Type: String
+    Default: iac/quickstart-microsoft-rdgateway/code/rds-deployment-manager.zip
+  LambdaCodeS3Bucket:
+    Description: Bucket where the Lambda code resides
+    Type: String
+    #todo: remove this
+    Default: bootstrap-automation-us-east-1-322553608824
+Resources:
+  AutoScalingEventRule:
+    Type: AWS::Events::Rule
+    DependsOn: RemoteDesktopDeploymentManagerLambda
+    Metadata:
+      Tags:
+        - Key: Name
+          Value: "RD-Connection-Broker-Scaling-EventRule"
+    Properties:
+      Description: Sends autoscaling events to Lambda function
+      EventPattern:
+        source:
+          - aws.autoscaling
+        detail-type:
+          - "EC2 Instance Launch Successful"
+          - "EC2 Instance Terminate Successful"
+          - "EC2 Instance Launch Unsuccessful"
+          - "EC2 Instance Terminate Unsuccessful"
+          - "EC2 Instance-launch Lifecycle Action"
+          - "EC2 Instance-terminate Lifecycle Action"
+#        "detail":
+#          "AutoScalingGroupName":
+#            - !Ref RDSConnectionBrokerAutoScalingGroupName
+#            - !Ref RDSGatewayAutoScalingGroupName
+#            - !Ref RDSWebAutoScalingGroupName
+      Targets:
+        - Id: "RDSComponentManagerLambda"
+          Arn: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn
+  RemoteDesktopDeploymentManagerRole:
+    Type: AWS::IAM::Role
+    Description: Role to allow Lambda to manage RDS Deployment
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+#        - PolicyName: SecretCredentialAccess
+#          PolicyDocument:
+#            Statement:
+#              - Effect: Allow
+#                Action:
+#                  - secretsmanager:GetSecretValue
+#                Resource:
+#                  - !Ref ADUsernameSecretArn
+#                  - !Ref ADPasswordSecretArn
+        - PolicyName: AccessEventBridge
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:*
+                Resource: "*"
+        - PolicyName: Logging
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:*:log-group:/aws/lambda/*:log-stream:*'
+#        - PolicyName: SQSAccess
+#          PolicyDocument:
+#            Version: '2012-10-17'
+#            Statement:
+#              - Action:
+#                  - sqs:ReceiveMessage
+#                  - sqs:SendMessage
+#                  - sqs:DeleteMessage
+#                  - sqs:GetQueueUrl
+#                  - sqs:GetQueueAttributes
+#                Resource:
+#                  - !Ref SQSQueueArn
+#                Effect: Allow
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RDSComponentManagementDDBTableName}"
+                Effect: Allow
+  #  WorkspacesLambdaSG:
+#    Type: AWS::EC2::SecurityGroup
+#    Properties:
+#      GroupDescription: Allows Workspaces management lambdas to communicate with AD and RDGW
+#      GroupName: WorkspacesManagementSG
+#      SecurityGroupEgress:
+#        - CidrIp: 0.0.0.0/0
+#          IpProtocol: -1
+#      VpcId: !Ref WorkspaceAutomationVPC
+  RemoteDesktopDeploymentManagerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RemoteDesktopDeploymentManager
+      Handler: index.handler
+#      VpcConfig:
+#        SecurityGroupIds:
+#          - !Ref WorkspacesLambdaSG
+#        SubnetIds: !Ref Subnets
+      Description: Manages Remote Desktop Deployment.
+      Role: !GetAtt RemoteDesktopDeploymentManagerRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeFilePath
+      Runtime: nodejs10.x
+      Timeout: 300  # 5 minutes at most should be all that is required for this lambda to run
+      MemorySize: 1024
+      Environment:
+        Variables:
+#          SQS_ARN: !Ref SQSQueueArn
+#          SQS_URI: !Ref SQSQueueUri
+          TABLE_NAME: !Ref RDSComponentManagementDDBTableName
+          CONNECTION_BROKER_ASG: !Ref RDSConnectionBrokerAutoScalingGroupName
+          GATWAY_ASG: !Ref RDSGatewayAutoScalingGroupName
+          WEB_ACCESS_ASG: !Ref RDSWebAutoScalingGroupName
+#          AD_USERNAME_CREDENTIAL_SECRET: !Ref UsernameSecretName
+#          AD_PASSWORD_CREDENTIAL_SECRET: !Ref PasswordSecretName
+#          RD_GATEWAY_ASG: !Ref RDGatewayASG
+#          RD_WEB_ASG: !Ref RDWebASG
+#          RD_CONNECTION_BROKER: !Ref RDConnectionBrokerASG
+#          SQS_WORKSPACE_AUTOMATION_QUEUE: !Ref SQSqueue
+#  SQSqueueLambdaEvent:
+#    Type: AWS::Lambda::EventSourceMapping
+#    Properties:
+#      BatchSize: 1
+#      Enabled: True
+#      EventSourceArn: !Ref SQSQueueArn
+#      FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
+
+  CloudWatchRulePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt AutoScalingEventRule.Arn
+
+  LambdaInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
+      Action: "lambda:InvokeFunction"
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SNSTopic

@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates SNS Notification for Scaling Actions
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Directory Information
+        Parameters:
+          - UsernameSecretName
+          - PasswordSecretName
+#      - Label:
+#          default: RDS Deployment Auto Scaling Groups
+#        Parameters:
+#          - RDSConnectionBrokerAutoScalingGroupName
+#          - RDSGatewayAutoScalingGroupName
+#          - RDSWebAutoScalingGroupName
+      - Label:
+          default: Lambda Details
+        Parameters:
+          - RDSComponentManagementDDBTableName
+          - LambdaCodeS3Bucket
+          - LambdaCodeFilePath
+      - Label:
+          default: Notification Settings
+        Parameters:
+          - OperatorEMail
+Parameters:
+  UsernameSecretName:
+    Type: String
+    Description: The name of the secret that contains the username part of the user manage the RDS Deployment with
+  PasswordSecretName:
+    Type: String
+    Description: The name of the secret that contains the password part of the user manage the RDS Deployment with
+#  RDSConnectionBrokerAutoScalingGroupName:
+#    Type: String
+#    Description: The name of the RDS Connection Broker AutoScalingGroup
+#  RDSGatewayAutoScalingGroupName:
+#    Type: String
+#    Description: The name of the RDS Gateway AutoScalingGroup
+#  RDSWebAutoScalingGroupName:
+#    Type: String
+#    Description: The name of the RDS Web Access AutoScalingGroup
+  RDSComponentManagementDDBTableName:
+    Type: String
+    Description: The Nmae of the table to use to track RDS Components
+    Default: RDSComponentManagement
+  LambdaCodeFilePath:
+    Description: Path and filename of the zip file that represents the Lambda function. Do not include leading /
+    Type: String
+    Default: iac/quickstart-microsoft-rdgateway/code/rds-deployment-manager.zip
+  LambdaCodeS3Bucket:
+    Description: Bucket where the Lambda code resides
+    Type: String
+    #todo: remove this
+    Default: bootstrap-automation-us-east-1-322553608824
+  OperatorEMail:
+    Description: EMail address to notify if there are any scaling operations
+    Type: String
+    AllowedPattern: >-
+      ([a-zA-Z0-9_\-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)
+    ConstraintDescription: must be a valid email address.
+Resources:
+  # CloudWatch Event Rule
+  AutoScalingEventRule:
+    Type: AWS::Events::Rule
+    DependsOn: RemoteDesktopDeploymentManagerLambda
+    Metadata:
+      Tags:
+        - Key: Name
+          Value: "RD-Connection-Broker-Scaling-EventRule"
+    Properties:
+      Description: Sends autoscaling events to Lambda function
+      EventPattern:
+        source:
+          - aws.autoscaling
+        detail-type:
+          - "EC2 Instance Launch Successful"
+          - "EC2 Instance Terminate Successful"
+          - "EC2 Instance Launch Unsuccessful"
+          - "EC2 Instance Terminate Unsuccessful"
+          - "EC2 Instance-launch Lifecycle Action"
+          - "EC2 Instance-terminate Lifecycle Action"
+      #        "detail":
+      #          "AutoScalingGroupName":
+      #            - !Ref RDSConnectionBrokerAutoScalingGroupName
+      #            - !Ref RDSGatewayAutoScalingGroupName
+      #            - !Ref RDSWebAutoScalingGroupName
+      Targets:
+        - Id: "RDSComponentManagerLambda"
+          Arn: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn
+  # SNS Queue for email notifications of scaling activity
+  NotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !Ref OperatorEMail # Send to Email
+          Protocol: email
+        - Endpoint: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn # Send to Lambda
+            Protocol: lambda
+  RemoteDesktopDeploymentManagerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RemoteDesktopDeploymentManager
+      Handler: index.handler
+      Description: Manages Remote Desktop Deployment.
+      Role: !GetAtt RemoteDesktopDeploymentManagerRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeFilePath
+      Runtime: nodejs10.x
+      Timeout: 300  # 5 minutes at most should be all that is required for this lambda to run
+      MemorySize: 1024
+      Environment:
+        Variables:
+#          SQS_URI: !Ref SQSQueueUri
+          TABLE_NAME: !Ref RDSComponentManagementDDBTableName
+#          CONNECTION_BROKER_ASG: !Ref RDSConnectionBrokerAutoScalingGroupName
+#          GATWAY_ASG: !Ref RDSGatewayAutoScalingGroupName
+#          WEB_ACCESS_ASG: !Ref RDSWebAutoScalingGroupName
+  CloudWatchRulePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt AutoScalingEventRule.Arn
+# Role for RDS Management Lambda
+  RemoteDesktopDeploymentManagerRole:
+    Type: AWS::IAM::Role
+    Description: Role to allow Lambda to manage RDS Deployment
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AccessEventBridge
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:*
+                Resource: "*"
+        - PolicyName: Logging
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:*:log-group:/aws/lambda/*:log-stream:*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RDSComponentManagementDDBTableName}"
+                Effect: Allow
+        - PolicyName: Other
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - "autoscaling:CompleteLifecycleAction"
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeInstanceAttribute"
+                  - "ec2:DescribeInstanceStatus"
+                  - "ec2:DescribeHosts"
+                  - "sns:Publish"
+                  - "sns:ListSubscriptions"
+                Resource: "*"
+                Effect: Allow
+#  SQSqueue:
+#    Type: AWS::SQS::Queue
+#    Properties:
+#      DelaySeconds: 0
+#      MessageRetentionPeriod: 604800
+#      QueueName: WorkspaceRemoteDesktopAutomationSQSqueue
+#      ReceiveMessageWaitTimeSeconds: 0
+#      VisibilityTimeout: 900
+#  SQSQueuePolicy:
+#    Type: AWS::SQS::QueuePolicy
+#    DependsOn: SQSqueue
+#    Properties:
+#      PolicyDocument:
+#        Id: QueuePolicyForRDSDeployment
+#        Version: '2012-10-17'
+#        Statement:
+#          - Sid: Allow-Lambda-SendMessage
+#            Effect: Allow
+#            Principal: "*"
+#            Action:
+#              - sqs:SendMessage
+#              - sqs:ReceiveMessage
+#              - sqs:GetQueueUrl
+#            Resource: "*"
+#            Condition:
+#              ArnLike:
+#                aws:SourceArn: !Sub |
+#                  arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:*
+#                  arn:${AWS::Partition}:autoscaling:*:${AWS::AccountId}:*
+#      Queues:
+#        - !Ref SQSqueue
+
+
+Outputs:
+#  NotificationTopicArn:
+#    Description: The URL of the website
+#    Value: !Ref NotificationTopic
+#    Export:
+#      Name: NotificationTopicArn
+#  SQSqueueArn:
+#    Description: The ARN of the SQS Queue
+#    Value: !GetAtt SQSqueue.Arn
+#    Export:
+#      Name: SQSqueueArn
+#  SQSqueueUri:
+#    Description: The ARN of the SQS Queue
+#    Value: !Ref SQSqueue
+#    Export:
+#      Name: SQSqueueUri

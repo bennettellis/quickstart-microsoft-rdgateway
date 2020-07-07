@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template will create an auto-scaling group with specified Remote Desktop Services Component deployed
+  to the instances in the private VPC subnets specified. **WARNING** This template creates Amazon EC2
+  Windows instance and related resources. You will be billed for the AWS resources
+  used if you create a stack from this template. QS(0006)
+Parameters:
+  S3BucketName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
+    ConstraintDescription: Quick Start bucket name can include numbers, lowercase
+      letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen
+      (-).
+    #TODO: Set to VAEC Bootstrap Bucket
+    Default: bootstrap-automation-us-east-1-322553608824
+    Description: S3 bucket name for the Quick Start assets. Quick Start bucket name
+      can include numbers, lowercase letters, uppercase letters, and hyphens (-).
+      It cannot start or end with a hyphen (-).
+    Type: String
+  S3KeyPrefix:
+    AllowedPattern: ^[0-9a-zA-Z-/]*$
+    ConstraintDescription: Quick Start key prefix can include numbers, lowercase letters,
+      uppercase letters, hyphens (-), and forward slash (/).
+    Default: iac/quickstart-microsoft-rdgateway/
+    Description: S3 key prefix for the Quick Start assets. Quick Start key prefix
+      can include numbers, lowercase letters, uppercase letters, hyphens (-), and
+      forward slash (/).
+    Type: String
+  S3BucketRegion:
+    Description: "The AWS Region where the S3 bucket (S3BucketName) is hosted. When using your own bucket, you must specify this value."
+    Type: String
+    #TODO Set this to VAEC region (Probably us-gov-west-1)
+    Default: 'us-east-1'
+Conditions:
+  UsingDefaultBucket: !Equals [!Ref S3BucketName, 'aws-quickstart']
+Resources:
+  LifecycleNotificationRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - autoscaling.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole"
+      Policies:
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  # Weirdly required: see https://aws.amazon.com/premiumsupport/knowledge-center/ec2-auto-scaling-lifecycle-hook-error/
+                  - sns:Publish
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:*"
+                  # TODO: Reinstate VAEC Setting
+                  #- !Sub arn:${AWS::Partition}:secretsmanager:*:*:secret:/vaec/workspaces/domains/va.gov/*
+                Effect: Allow
+
+#  LifecycleNotificationRole:
+#    Type: AWS::IAM::Role
+#    Properties:
+#      ManagedPolicyArns:
+#        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AutoScalingNotificationAccessRole
+#      # Path: /vaec/
+#      AssumeRolePolicyDocument:
+#        Statement:
+#          - Action:
+#              - sts:AssumeRole
+#            Principal:
+#              Service:
+#                - autoscaling.amazonaws.com
+#            Effect: Allow
+#        Version: '2012-10-17'
+#      Policies:
+#        - PolicyName: SQSAccess
+#          PolicyDocument:
+#            Version: '2012-10-17'
+#            Statement:
+#              - Action:
+#                  - sqs:SendMessage
+#                  - sqs:GetQueueUrl
+#                  # Weirdly required: see https://aws.amazon.com/premiumsupport/knowledge-center/ec2-auto-scaling-lifecycle-hook-error/
+#                  - sns:Publish
+#                Resource:
+#                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:*"
+#                  # TODO: Reinstate VAEC Setting
+#                  #- !Sub arn:${AWS::Partition}:secretsmanager:*:*:secret:/vaec/workspaces/domains/va.gov/*
+#                Effect: Allow
+  HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMDirectoryServiceAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:*:*:secret:*
+                  # TODO: Reinstate VAEC Setting
+                  #- !Sub arn:${AWS::Partition}:secretsmanager:*:*:secret:/vaec/workspaces/domains/va.gov/*
+                Effect: Allow
+        - PolicyName: aws-quick-start-s3-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - s3:GetObject
+                Resource: !Sub
+                  - arn:${AWS::Partition}:s3:::${S3Bucket}/${S3KeyPrefix}*
+                  - S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+                Effect: Allow
+        - PolicyName: Logging
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:DescribeLogGroups'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:*:log-group:/aws/ec2/*:log-stream:*'
+      # Path: /vaec/
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Effect: Allow
+        Version: '2012-10-17'
+  HostProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref HostRole
+      Path: /
+Outputs:
+  RemoteDesktopInstanceRole:
+    Value: !Ref HostRole
+    Description: Host Role ARN
+    Export:
+      Name: RemoteDesktopInstanceRole
+  RemoteDesktopInstanceProfile:
+    Value: !Ref HostProfile
+    Description: Host Profile ARN
+    Export:
+      Name: RemoteDesktopInstanceProfile
+  LifecycleNotificationRole:
+    Value: !GetAtt LifecycleNotificationRole.Arn
+    Description: Lifecycle Notification Role ARN
+    Export:
+      Name: LifecycleNotificationRole

@@ -1,0 +1,551 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template will create an auto-scaling group with specified Remote Desktop Services Component deployed
+  to the instances in the private VPC subnets specified. **WARNING** This template creates Amazon EC2
+  Windows instance and related resources. You will be billed for the AWS resources
+  used if you create a stack from this template. QS(0006)
+Parameters:
+  DomainDNSName:
+    Description: Fully qualified domain name (FQDN) e.g. example.com
+    Type: String
+    MinLength: '2'
+    MaxLength: '255'
+    AllowedPattern: '[a-zA-Z0-9\-]+\..+'
+    #todo: Remove This.
+    Default: ad.slice-global.com
+  DomainOUPath:
+    Description: OU path of the domain
+    Type: String
+    #todo: remove this.
+    Default: "OU=RemoteDesktopDeployment,OU=Computers,OU=ad-slice-global,DC=ad,DC=slice-global,DC=com"
+  # DomainMemberSGID:
+  #   Description: ID of the Domain Member Security Group (e.g., sg-7f16e910)
+  #   Type: AWS::EC2::SecurityGroup::Id
+  DomainNetBIOSName:
+    AllowedPattern: '[a-zA-Z0-9\-]+'
+    #TODO: REMOVE THIS
+    Default: ad-slice-global
+    Description: NetBIOS name of the domain (up to 15 characters) for users of earlier
+      versions of Windows e.g. EXAMPLE
+    MaxLength: '15'
+    MinLength: '1'
+    Type: String
+  KeyPairName:
+    Description: Public/private key pairs allow you to securely connect to your instance
+      after it launches
+    #TODO: REMOVE THIS
+    Default: bellisIsengardKey1
+    Type: String #AWS::EC2::KeyPair::KeyName
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base
+    #TODO Reinstate VAEC Setting
+    #Default: /vaec/ec2/windows-ami
+  DesiredNumberOfHosts:
+    AllowedValues: ['1','2','3','4','5','6','7','8','9','10']
+    Default: '2'
+    Description: Enter the number of Remote Desktop Gateway hosts to create
+    Type: String
+  PrivateSubnetIDs:
+    Description: IDs of the private subnets that you want to provision the Remove Dekstop Services into
+    Type: List<AWS::EC2::Subnet::Id>
+    #TODO: Remove this
+    Default: subnet-0fcf3274bd1a93fc1,subnet-0de9568544b25331c
+  S3BucketName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
+    ConstraintDescription: Solution bucket name can include numbers, lowercase
+      letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen
+      (-).
+    #TODO: Set to VAEC Bootstrap Bucket
+    Default: bootstrap-automation-us-east-1-322553608824
+    Description: S3 bucket name for the Solution assets. Solution bucket name
+      can include numbers, lowercase letters, uppercase letters, and hyphens (-).
+      It cannot start or end with a hyphen (-).
+    Type: String
+  S3KeyPrefix:
+    AllowedPattern: ^[0-9a-zA-Z-/]*$
+    ConstraintDescription: Solution key prefix can include numbers, lowercase letters,
+      uppercase letters, hyphens (-), and forward slash (/).
+    Default: iac/quickstart-microsoft-rdgateway/
+    Description: S3 key prefix for the Solution assets. Solution key prefix
+      can include numbers, lowercase letters, uppercase letters, hyphens (-), and
+      forward slash (/).
+    Type: String
+  S3BucketRegion:
+    Description: "The AWS Region where the S3 bucket (S3BucketName) is hosted. When using your own bucket, you must specify this value."
+    Type: String
+    #TODO Set this to VAEC region (Probably us-gov-west-1)
+    Default: 'us-east-1'
+  RDSInstanceType:
+    Description: Amazon EC2 instance type for the Remote Desktop Services instances
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+      - t2.small
+      - t2.medium
+      - t2.large
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+  AllowedCIDR:
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    Description: Allowed CIDR Block for access to the Remote Desktop Services Servers
+    Type: String
+    # Default: 10.0.0.0/8
+    #TODO: REMOVE THIS
+    Default: 0.0.0.0/0
+  VPCID:
+    Description: ID of the VPC (e.g., vpc-0343606e)
+    Type: AWS::EC2::VPC::Id
+    #TODO: REMOVE THIS
+    Default: vpc-057dfad899f784793
+  DomainID:
+    Description: "AD Connector Director ID"
+    Type: String
+    #todo: Remove this
+    Default: 'd-906779b94b'
+  CertSecretName:
+    Description: >-
+      ID for Secret that contains base64 encoded version of pfx file that contains the certificate information for the
+      remote desktop service you are deploying. The cert's CN must match the CertCN parameter to operate correctly.
+    Type: String
+    #todo: Remove this
+    Default: rds-deployment-rdcb-cert
+  CertCN:
+    Description: Comman Name specified in the TLS Certificate. Certificate should be for the main entry point to the solution fronted by the Load Balancer.
+    Type: String
+    #todo: Remove This
+    Default: rdcb.ad.slice-global.com
+  CertPassword:
+    Type: String
+    Description: If your cert PFX file is password protected, enter the password here
+    Default: "M33merK)sly(1234!"
+    NoEcho: true
+  UserNameSecretName:
+    Description: ARN of the secret that contains the name of the service account
+    Type: String
+    Default: workspaces-automation-username
+  PasswordSecretName:
+    Description: ARN of the secret that contains the password of the service account
+    Type: String
+    Default: workspaces-automation-p
+  SqlServerInstanceName:
+    Description: THe host name of the SQL server to connect to for HA
+    Type: String
+    #todo: Remove this??
+    #todo: Figure out right way to get this to the connection broker, probably inline powershell script.
+    Default: "rdcbha.cfylsopa0yyy.us-east-1.rds.amazonaws.com"
+  SqlServerPort:
+    Description: THe port of the SQL server to connect to for HA
+    Type: Number
+    Default: 1433
+  RDComponentToDeploy:
+    Type: String
+    Description: The compontent to deploy
+    Default: RDS-Connection-Broker
+    AllowedValues:
+      - RDS-Connection-Broker
+      - RDS-Licensing
+      - RDS-Web-Access
+      - RDS-Gateway
+#      - RDS-RD-Server
+  SNSNotificationTopicArn:
+    Type: String
+    Description: The ARN of the SNS Topic to notify when scaling actions occur for this component
+    #TODO remove this
+    Default: "arn:aws:sns:us-east-1:322553608824:rds-notifications-NotificationTopic-5T3G18CZHSIX"
+#  SQSQueueArn:
+#    Type: String
+#    Description: The ARN of the SQS queue to send scaling notifications to and listen for configuration actions on
+#    Default: "arn:aws:sqs:us-east-1:322553608824:WorkspaceRemoteDesktopAutomationSQSqueue"
+#  NotificationLambdaArn:
+#    Type: String
+#    Description: The ARN of the Lambda that will be notified for LifecycleHook activity, allowing the lambda to manage the deployment
+  LifecycleNotificationRole:
+    Type: String
+    Description: The ARN of the notification role that allows AutoScaling to send messages to SQS for Lifecycle Events.
+    Default: "arn:aws:iam::322553608824:role/rds-roles-LifecycleNotificationRole-1FTNIT4YMFM9Y"
+  RemoteDesktopInstanceRole:
+    Type: String
+    Description: The ARN of the role that will be assigned to each EC2 instance deployed in this solution
+    Default: rds-roles-HostRole-D4UJOEUODUQM
+  RemoteDesktopInstanceProfile:
+    Type: String
+    Description: The name of the instance profile that will be assigned to each EC2 instance deployed in the solution.
+    Default: rds-roles-HostProfile-4IZSDI524KBE
+Rules:
+  SubnetsInVPC:
+    Assertions:
+      - Assert: !EachMemberIn
+          - !ValueOfAll
+            - AWS::EC2::Subnet::Id
+            - VpcId
+          - !RefAll 'AWS::EC2::VPC::Id'
+        AssertDescription: All subnets must in the VPC
+  CheckSupportedInstances:
+    RuleCondition: !Contains
+      - - m4.large
+        - m4.xlarge
+        - m4.2xlarge
+        - m4.4xlarge
+      - !Ref 'RDSInstanceType'
+    Assertions:
+      - Assert: !Not
+          - !Contains
+            - - eu-west-3
+            - !Ref 'AWS::Region'
+        AssertDescription: M4 instances are not available in the Paris region
+Conditions:
+  UsingDefaultBucket: !Equals [!Ref S3BucketName, 'aws-quickstart']
+  RDSConnectionBrokerComponent: !Equals [!Ref RDComponentToDeploy, 'RDS-Connection-Broker']
+  RDSGatewayComponent: !Equals [!Ref RDComponentToDeploy, 'RDS-Gateway']
+  RDSWebComponent: !Equals [!Ref RDComponentToDeploy, 'RDS-Web-Access']
+  RDSLicenseComponent: !Equals [!Ref RDComponentToDeploy, 'RDS-Licensing']
+Resources:
+
+#  InstanceTerminatingHook:
+#    Type: "AWS::AutoScaling::LifecycleHook"
+#    Properties:
+#      AutoScalingGroupName: !Ref ECSAutoScalingGroupName
+#      DefaultResult: ABANDON
+#      HeartbeatTimeout: "900"
+#      LifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING"
+#      NotificationTargetARN: !Ref NotificationTopic
+#      RoleARN: !GetAtt
+#        - AutoscalingNotificationRole
+#        - Arn
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      VPCZoneIdentifier: !Ref PrivateSubnetIDs
+      MinSize: 0
+      #TODO Determine if this should be a parameter
+      MaxSize: !Ref DesiredNumberOfHosts
+      TargetGroupARNs:
+        Fn::If:
+          - RDSGatewayComponent
+          - [!Ref ALBTargetGroup, !Ref ALBTargetGroupForGWOnly]
+          - [!Ref ALBTargetGroup]
+      Cooldown: '900'
+      DesiredCapacity: !Ref DesiredNumberOfHosts
+      Tags:
+        - Key: Name
+          Value: !Ref RDComponentToDeploy
+          PropagateAtLaunch: true
+      NotificationConfiguration:
+        TopicARN: !Ref SNSNotificationTopicArn
+        NotificationTypes:
+          - 'autoscaling:EC2_INSTANCE_LAUNCH'
+          - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+      LifecycleHookSpecificationList:
+        - LifecycleTransition: "autoscaling:EC2_INSTANCE_LAUNCHING"
+          LifecycleHookName: !Sub "${RDComponentToDeploy}-LAUNCHING"
+          HeartbeatTimeout: 1200  # 20 minutes
+          NotificationTargetARN: !Ref SNSNotificationTopicArn
+          RoleARN: !Ref LifecycleNotificationRole
+          DefaultResult: ABANDON
+        - LifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING"
+          LifecycleHookName: !Sub "${RDComponentToDeploy}-TERMINATING"
+          HeartbeatTimeout: 300  # 5 minutes
+          NotificationTargetARN: !Ref SNSNotificationTopicArn
+          RoleARN: !Ref LifecycleNotificationRole
+          DefaultResult: CONTINUE
+    CreationPolicy:
+      ResourceSignal:
+        Count: 0
+        Timeout: PT30M  # Instances must come to life within 30 minutes
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+        PauseTime: PT15M
+        WaitOnResourceSignals: 'true'
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Authentication:
+        S3AccessCreds:
+          type: S3
+          roleName: !Ref RemoteDesktopInstanceRole
+          buckets:
+              - !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+      AWS::CloudFormation::Init:
+        configSets:
+          config:
+            - setup
+            - join
+            - restarts
+            - installCert
+            - installRDS
+            - installSQLDriver
+            - restarts
+            - finalize
+        setup:
+          files:
+            c:\cfn\cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackName}
+                region=${AWS::Region}
+            c:\cfn\hooks.d\cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.LaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=cfn-init.exe -v --stack ${AWS::StackName} --resource LaunchConfiguration --region ${AWS::Region}
+            C:\cfn\scripts\Unzip-Archive.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}submodules/quickstart-microsoft-utilities/scripts/Unzip-Archive.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            C:\cfn\modules\AWSQuickStart.zip:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}submodules/quickstart-microsoft-utilities/modules/AWSQuickStart.zip
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            C:\cfn\scripts\Join-Domain.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Join-Domain.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            C:\cfn\scripts\Install-RDSCertificate.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Install-RDSCertificate.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            C:\cfn\scripts\Install-SQLServerNativeClient.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Install-SQLServerNativeClient.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            C:\cfn\scripts\Install-SQLServerManager.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Install-SQLServerManager.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            c:\cfn\scripts\Initialize-RDGW.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Initialize-RDGW.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            c:\cfn\scripts\Add-NewRDSNodeToRDSFarm.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Add-NewRDSNodeToRDSFarm.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            c:\cfn\scripts\Config-RDWebSettingsForPIV.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Config-RDWebSettingsForPIV.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+            c:\cfn\scripts\Config-RDSConnectionBroker.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Config-RDSConnectionBroker.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
+          services:
+            windows:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - c:\cfn\cfn-hup.conf
+                  - c:\cfn\hooks.d\cfn-auto-reloader.conf
+          commands:
+            a-set-execution-policy:
+              command: powershell.exe -Command "Set-ExecutionPolicy RemoteSigned -Force"
+              waitAfterCompletion: '0'
+            b-unpack-quickstart-module:
+              command: !Sub >
+                powershell.exe -Command C:\cfn\scripts\Unzip-Archive.ps1 -Source C:\cfn\modules\AWSQuickStart.zip
+                -Destination C:\Windows\system32\WindowsPowerShell\v1.0\Modules\
+              waitAfterCompletion: '0'
+        join:
+          commands:
+            a-join-domain:
+              command: !Sub >
+                powershell.exe -Command "C:\cfn\scripts\Join-Domain.ps1 -DomainName '${DomainDNSName}'
+                -OUPath '${DomainOUPath}' -UserNameSecretName '${UserNameSecretName}' -PwdSecretName '${PasswordSecretName}'"
+              waitAfterCompletion: '0'
+        installCert:
+          commands:
+            a-install-cert:
+              command: !Sub >
+                powershell.exe -Command "C:\cfn\scripts\Install-RDSCertificate.ps1 -PFXCertificatePassword '${CertPassword}' -PFXCertificateSecretName '${CertSecretName}'"
+              waitAfterCompletion: '0'
+        installRDS:
+          commands:
+            a-install-rds:
+              # todo: figure out if we need to install the RSAT tools or not. This allows us to manage all RD Services from another machine.
+              # echo 'Starting Remote Desktop Services installation for component ${RDComponentToDeploy}'
+              command: !Sub >
+                powershell.exe -Command "Install-WindowsFeature ${RDComponentToDeploy},RSAT-RDS-Gateway -IncludeManagementTools"
+              waitAfterCompletion: '0'
+            b-install-additional-features:
+              # echo 'Starting Remote Desktop Services installation for component ${RDComponentToDeploy}'
+              command:
+                Fn::If:
+                  - RDSConnectionBrokerComponent # for Connection Broker we need these to also be Session Hosts (chicken-egg thing without having workspaces on first instance)
+                  - powershell.exe -Command "Install-WindowsFeature RDS-RD-Server"
+                  - Fn::If:
+                      - RDSWebComponent # for Web Access we need the Client Certificate Mapping Authentication feature
+                      - powershell.exe -Command "Install-WindowsFeature Web-Client-Auth"
+                      - powershell.exe -Command "echo 'No additional features to install for this component.'"
+              waitAfterCompletion: '0'
+        installSQLDriver:
+          commands:
+            a-install-sql-server-manager:
+              command:
+                Fn::If:
+                  - RDSConnectionBrokerComponent
+                  - Fn::Sub: >
+                      powershell.exe -Command "C:\cfn\scripts\Install-SQLServerNativeClient.ps1"
+                  - powershell.exe -Command "echo 'Not installing SQL Server Native Client. Only installed on connection broker instances.'"
+              waitAfterCompletion: '0'
+        restarts:
+          commands:
+            restart-server:
+              command: !Sub >
+                powershell.exe -Command "Restart-Computer -Force"
+              waitAfterCompletion: 300
+        finalize:
+          commands:
+            1-signal-success:
+              command: !Sub >
+                powershell.exe -Command "cfn-signal.exe --resource LaunchConfiguration --stack ${AWS::StackName} --region ${AWS::Region}"
+              waitAfterCompletion: '0'
+        finalize2:
+          commands:
+            1-signal-success:
+              command: !Sub >
+                powershell.exe -Command "cfn-signal.exe --resource AutoScalingGroup --stack ${AWS::StackName} --region ${AWS::Region}"
+              waitAfterCompletion: '0'
+    Properties:
+      ImageId: !Ref 'LatestAmiId'
+      SecurityGroups:
+        - !Ref RemoteDesktopServiceSG
+        #- !Ref 'DomainMemberSGID'
+      IamInstanceProfile: !Ref RemoteDesktopInstanceProfile
+      InstanceType: !Ref 'RDSInstanceType'
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp2
+      KeyName: !Ref 'KeyPairName'
+      UserData:
+        # Make sure to call from powershell so that we get the $lastexitcode value properly.
+#        powershell.exe -Command "cfn-signal.exe -e $lastexitcode --resource AutoScalingGroup --stack ${AWS::StackName} --region ${AWS::Region}"
+        Fn::Base64: !Sub |
+          <script>
+          powershell.exe -Command "cfn-init.exe -v -c config --stack ${AWS::StackName} --resource LaunchConfiguration --region ${AWS::Region}"
+          </script>
+  RemoteDesktopServiceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable RDP access from the Internet
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: udp
+          FromPort: 3391
+          ToPort: 3391
+          CidrIp: !Ref AllowedCIDR
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref AllowedCIDR
+          #TODO: Remove this for VA
+        - SourceSecurityGroupId: !ImportValue BastionHostSG
+          IpProtocol: -1
+# pAccountNumberOfEC2reportingDDB: !GetAtt ["rAWSec2TrackerDDB", "Outputs.oAWSec2TrackerDDBtableArn" ]
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      Port:
+        Fn::If: [RDSConnectionBrokerComponent, 3389, 443]
+      Protocol: TCP
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: TCP
+      HealthCheckTimeoutSeconds: 10
+      UnhealthyThresholdCount: 3
+      TargetType: "instance"
+      HealthyThresholdCount: 3
+      VpcId: !Ref VPCID
+#      Name: !Sub "${RemoteDesktopServiceNetworkLoadBalancer.LoadBalancerName}-target-group"
+      HealthCheckEnabled: true
+  ALBTargetGroupForGWOnly:
+    Condition: RDSGatewayComponent
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      Port: 3391
+      Protocol: UDP
+      HealthCheckPort: 443
+      HealthCheckProtocol: TCP
+      HealthCheckTimeoutSeconds: 10
+      UnhealthyThresholdCount: 3
+      TargetType: "instance"
+      HealthyThresholdCount: 3
+      VpcId: !Ref VPCID
+#      Name: !Sub "${RemoteDesktopServiceNetworkLoadBalancer.LoadBalancerName}-target-group"
+      HealthCheckEnabled: true
+  RemoteDesktopServiceNetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: true
+        - Key: access_logs.s3.enabled  #todo: determine if access logs need to be enabled and then where stored.
+          Value: false
+        - Key: deletion_protection.enabled
+          Value: false
+      Scheme: internal
+      Name: !Sub "${RDComponentToDeploy}-NLB"
+      Type: network
+      Subnets: !Ref PrivateSubnetIDs
+      IpAddressType: "ipv4"
+  # Listener to allow Load Balancer to redirect HTTP traffic to HTTPS
+  RemoteDesktopServicelistener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref RemoteDesktopServiceNetworkLoadBalancer
+      Port:
+        Fn::If: [RDSConnectionBrokerComponent, 3389, 443]
+      Protocol: TCP
+      DefaultActions:
+        - TargetGroupArn: !Ref ALBTargetGroup
+          Type: "forward"
+  RemoteDesktopServicelistenerForGWOnly:
+    Condition: RDSGatewayComponent
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref RemoteDesktopServiceNetworkLoadBalancer
+      Port: 3391
+      Protocol: UDP
+      DefaultActions:
+        - TargetGroupArn: !Ref ALBTargetGroupForGWOnly
+          Type: "forward"
