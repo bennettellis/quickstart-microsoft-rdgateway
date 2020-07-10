@@ -24,7 +24,7 @@ try {
     $UserName = Get-SECSecretValue -SecretId $UserNameSecretName -Select SecretString
     Write-Host $UserName
     $Password = Get-SECSecretValue -SecretId $PwdSecretName -Select SecretString
-    Write-Host $Password
+#    Write-Host $Password
     $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
     Write-Host (ConvertTo-Json -InputObject $securePassword)
     $creds = New-Object System.Management.Automation.PSCredential -ArgumentList $UserName,$securePassword
