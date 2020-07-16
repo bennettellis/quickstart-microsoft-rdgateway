@@ -18,6 +18,7 @@ Metadata:
       - Label:
           default: Lambda Details
         Parameters:
+          - DeploymentName
           - RDSComponentManagementDDBTableName
           - LambdaCodeS3Bucket
           - LambdaCodeFilePath
@@ -26,6 +27,12 @@ Metadata:
         Parameters:
           - OperatorEMail
 Parameters:
+  DeploymentName:
+    Type: String
+    Description: A unique name for this RDS Deployment in this account. Make sure each deployment in the same account has a different DeploymentName value.
+    Default: RDSDeployment1
+    AllowedPattern: '[a-zA-Z0-9\-]{3,40}'
+    ConstraintDescription: Must be alpha-nueric (- dashes allowed) value between 3 and 40 characters.
   UsernameSecretName:
     Type: String
     Description: The name of the secret that contains the username part of the user manage the RDS Deployment with
@@ -62,42 +69,49 @@ Parameters:
     ConstraintDescription: must be a valid email address.
 Resources:
   # CloudWatch Event Rule
-  AutoScalingEventRule:
-    Type: AWS::Events::Rule
-    DependsOn: RemoteDesktopDeploymentManagerLambda
-    Metadata:
-      Tags:
-        - Key: Name
-          Value: "RD-Connection-Broker-Scaling-EventRule"
-    Properties:
-      Description: Sends autoscaling events to Lambda function
-      EventPattern:
-        source:
-          - aws.autoscaling
-        detail-type:
-          - "EC2 Instance Launch Successful"
-          - "EC2 Instance Terminate Successful"
-          - "EC2 Instance Launch Unsuccessful"
-          - "EC2 Instance Terminate Unsuccessful"
-          - "EC2 Instance-launch Lifecycle Action"
-          - "EC2 Instance-terminate Lifecycle Action"
-      #        "detail":
-      #          "AutoScalingGroupName":
-      #            - !Ref RDSConnectionBrokerAutoScalingGroupName
-      #            - !Ref RDSGatewayAutoScalingGroupName
-      #            - !Ref RDSWebAutoScalingGroupName
-      Targets:
-        - Id: "RDSComponentManagerLambda"
-          Arn: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn
+#  AutoScalingEventRule:
+#    Type: AWS::Events::Rule
+#    DependsOn: RemoteDesktopDeploymentManagerLambda
+#    Metadata:
+#      Tags:
+#        - Key: Name
+#          Value: "RD-Connection-Broker-Scaling-EventRule"
+#    Properties:
+#      Description: Sends autoscaling events to Lambda function
+#      EventPattern:
+#        source:
+#          - aws.autoscaling
+#        detail-type:
+#          - "EC2 Instance Launch Successful"
+#          - "EC2 Instance Terminate Successful"
+#          - "EC2 Instance Launch Unsuccessful"
+#          - "EC2 Instance Terminate Unsuccessful"
+#          - "EC2 Instance-launch Lifecycle Action"
+#          - "EC2 Instance-terminate Lifecycle Action"
+#      #        "detail":
+#      #          "AutoScalingGroupName":
+#      #            - !Ref RDSConnectionBrokerAutoScalingGroupName
+#      #            - !Ref RDSGatewayAutoScalingGroupName
+#      #            - !Ref RDSWebAutoScalingGroupName
+#      Targets:
+#        - Id: "RDSComponentManagerLambda"
+#          Arn: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn
   # SNS Queue for email notifications of scaling activity
-  NotificationTopic:
+  ScalingEmailNotificationTopic:
     Type: 'AWS::SNS::Topic'
     Properties:
       Subscription:
         - Endpoint: !Ref OperatorEMail # Send to Email
           Protocol: email
-        - Endpoint: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn # Send to Lambda
-            Protocol: lambda
+  ScalingAutomationNotificationTopic:
+    Type: 'AWS::SNS::Topic'
+  LambdaSubscription:
+    DependsOn: RemoteDesktopDeploymentManagerLambda
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ScalingAutomationNotificationTopic
+      Protocol: lambda
+      Endpoint: !GetAtt RemoteDesktopDeploymentManagerLambda.Arn # Send to Lambda
   RemoteDesktopDeploymentManagerLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -115,16 +129,27 @@ Resources:
         Variables:
 #          SQS_URI: !Ref SQSQueueUri
           TABLE_NAME: !Ref RDSComponentManagementDDBTableName
-#          CONNECTION_BROKER_ASG: !Ref RDSConnectionBrokerAutoScalingGroupName
+          RDS_DEPLOYMENT_NAME: !Ref DeploymentName
+          SNS_TOPIC_ARN: !Ref ScalingAutomationNotificationTopic
+
+  #          CONNECTION_BROKER_ASG: !Ref RDSConnectionBrokerAutoScalingGroupName
 #          GATWAY_ASG: !Ref RDSGatewayAutoScalingGroupName
 #          WEB_ACCESS_ASG: !Ref RDSWebAutoScalingGroupName
-  CloudWatchRulePermission:
+#  CloudWatchRulePermission:
+#    Type: "AWS::Lambda::Permission"
+#    Properties:
+#      FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
+#      Action: "lambda:InvokeFunction"
+#      Principal: "events.amazonaws.com"
+#      SourceArn: !GetAtt AutoScalingEventRule.Arn
+  SNSRulePermission:
     Type: "AWS::Lambda::Permission"
     Properties:
       FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
       Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: !GetAtt AutoScalingEventRule.Arn
+      Principal: "sns.amazonaws.com"
+      SourceArn: !Ref ScalingAutomationNotificationTopic
+
 # Role for RDS Management Lambda
   RemoteDesktopDeploymentManagerRole:
     Type: AWS::IAM::Role
@@ -162,6 +187,7 @@ Resources:
             Statement:
               - Action:
                   - dynamodb:PutItem
+                  - dynamodb:Scan
                   - dynamodb:DeleteItem
                 Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RDSComponentManagementDDBTableName}"
                 Effect: Allow
@@ -177,6 +203,10 @@ Resources:
                   - "ec2:DescribeHosts"
                   - "sns:Publish"
                   - "sns:ListSubscriptions"
+                  - "ssm:ListCommandInvocations"
+                  - "ssm:PutParameter"
+                  - "ssm:GetParameter"
+                  - "ssm:DeleteParameter"
                 Resource: "*"
                 Effect: Allow
 #  SQSqueue:
@@ -213,11 +243,16 @@ Resources:
 
 
 Outputs:
-#  NotificationTopicArn:
-#    Description: The URL of the website
-#    Value: !Ref NotificationTopic
-#    Export:
-#      Name: NotificationTopicArn
+  ScalingEmailNotificationTopicArn:
+    Description: The URL of the website
+    Value: !Ref ScalingEmailNotificationTopic
+    Export:
+      Name: ScalingEmailNotificationTopicArn
+  ScalingAutomationNotificationTopicArn:
+    Description: The URL of the website
+    Value: !Ref ScalingAutomationNotificationTopic
+    Export:
+      Name: ScalingAutomationNotificationTopicArn
 #  SQSqueueArn:
 #    Description: The ARN of the SQS Queue
 #    Value: !GetAtt SQSqueue.Arn

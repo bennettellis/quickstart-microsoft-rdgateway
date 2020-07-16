@@ -4,15 +4,14 @@ const AWS = require('aws-sdk');
 const ec2 = new AWS.EC2();
 const autoscaling = new AWS.AutoScaling();
 const sns = new AWS.SNS();
-// const ddb = new AWS.DynamoDB.DocumentClient();
+const ddb = new AWS.DynamoDB.DocumentClient();
 const systemsManager = new AWS.SSM();
-const crypto = require("crypto");
+
 
 // DynamoDB table where configuration is kept
 const managementTable = process.env.TABLE_NAME;
 // SNS topic that we send messages to (doesn't have to be the same as the SNS queue for LifeCycleHooks but simpler).
 const snsTopicArn = process.env.SNS_TOPIC_ARN;
-const rdsDeploymentName = process.env.RDS_DEPLOYMENT_NAME;
 
 // types of RDS components
 const GATEWAY = "RDS-Gateway";
@@ -24,7 +23,6 @@ const NEW = "New";
 const CONFIGURED = "Configured";
 const CONFIGURING = "Configuring";
 const REMOVING = "Removing";
-const REMOVED = "Removed";
 
 // STATUS of configuration commands sent to
 const PENDING = "Pending";
@@ -50,26 +48,25 @@ module.exports.handler = async(event, context, callback) => {
   try {
     let message;
     if (!managementTable) throw Error("Value for environment variable TABLE_NAME is missing");
-    if (!snsTopicArn) throw Error("Value for SNS_TOPIC_ARN to send notifications to is missing");
-    if (!rdsDeploymentName) throw Error("Value for RDS_DEPLOYMENT_NAME is missing.")
+    if (!snsTopicArn) throw Error("Value for SNS Topic to send notifications to is missing");
     console.log(JSON.stringify(event));
     if (event.Records) {
       await Promise.all(event.Records.map(async rec => {
           const parsedMessage = JSON.parse(rec.Sns.Message);
           console.log(`Parsed Message was:\n${JSON.stringify(parsedMessage, null, 2)}`);
           if (parsedMessage.StatusCheck) {
-        console.log(`Handling status check event from Lambda...`);
+            console.log(`Handling status check event from Lambda...`);
             return handleStatusCheck(parsedMessage);
           } else if (parsedMessage.WorkspaceId) {
             console.log(`Handling workspace event...`);
             message = await handleWorkspaceEvent(parsedMessage);
             return Promise.resolve("Workspace Addition Skipped!");
           } else if (parsedMessage.LifecycleHookName) {
-        console.log(`Handling scaling event from autoscaling with LifeCycleHook...`);
+            console.log(`Handling scaling event from autoscaling with LifeCycleHook...`);
             return handleLifeCycleEvent(parsedMessage);
           } else {
             return Promise.resolve(Error("No way to deal with message"));
-      }
+          }
         }))
         .then(results => {
           console.log(JSON.stringify(results, null, 2));
@@ -108,32 +105,41 @@ async function handleLifeCycleEvent(event) {
 
 
 /**
+ * Gets the instance data that we have from the deployment extracted from DDB
+ *
+ *
+ */
+function findInstanceInDeployment(instanceId, deployment) {
+  return deployment.AllMembersList.find(inst => inst.InstanceId === instanceId);
+}
+
+
+/**
  * Handles a "status check" event from this lambda in order to wait for configuration completions
  * @param event
  * @returns {Promise<void>}
  */
 async function handleStatusCheck(event) {
   // check status of all existing commands run against the instance
-  const jobStatus = await getConfigurationStatus(event.EC2InstanceId);
+  const status = await getConfigurationStatus(event.EC2InstanceId);
   const deployment = await getDeployment();
 console.log(JSON.stringify(deployment, null, 2));
   // STATUS of configuration commands sent to
-  switch (jobStatus) {
+  switch (status) {
     case SUCCESS:
-      console.log(`Configuration status for ${event.EC2InstanceId}: ${jobStatus}. Signaling 'CONTINUE' for LifeCycleHook ${event.LifecycleHookName}.`);
+      console.log(`Configuration status for ${event.EC2InstanceId}: ${status}. Signaling 'CONTINUE' for LifeCycleHook ${event.LifecycleHookName}.`);
       // Complete the LifeCycle Action (CONTINUE)
       await autoscaling.completeLifecycleAction({
         LifecycleHookName: event.LifecycleHookName, AutoScalingGroupName: event.AutoScalingGroupName,
         LifecycleActionToken: event.LifecycleActionToken, LifecycleActionResult: 'CONTINUE'
       }).promise().catch(err => console.log(err));
-      const Status = (/-TERMINAT/i.test(event.LifecycleHookName)) ? REMOVED : CONFIGURED;
-      await setDeploymentMember({InstanceId: event.EC2InstanceId, Status});
+      await recordInstanceInDDB(Object.assign(findInstanceInDeployment(event.EC2InstanceId, deployment), {Status: CONFIGURED}));
       // at this point the instance is fully added or removed from the Deployment
       break;
     case INPROGRESS:
     case PENDING:
     case DELAYED:
-      console.log(`Configuration status for ${event.EC2InstanceId}: ${jobStatus}. Sleeping for 30 seconds...`);
+      console.log(`Configuration status for ${event.EC2InstanceId}: ${status}. Sleeping for 30 seconds...`);
       await wait(DEFAULT_DELAY);
       await publishSNSMessage(event, snsTopicArn);
       // at this point the addition or removal of the instance is "in progress" and will be checked by next message
@@ -142,15 +148,15 @@ console.log(JSON.stringify(deployment, null, 2));
     case CANCELLED:
     case CANCELLING:
     case TIMEDOUT:
-      console.log(`Configuration status for ${event.EC2InstanceId}: ${jobStatus}. Signaling 'ABANDON' for LifeCycleHook ${event.LifecycleHookName}.`);
+      console.log(`Configuration status for ${event.EC2InstanceId}: ${status}. Signaling 'ABANDON' for LifeCycleHook ${event.LifecycleHookName}.`);
       await autoscaling.completeLifecycleAction({
         LifecycleHookName: event.LifecycleHookName, AutoScalingGroupName: event.AutoScalingGroupName,
         LifecycleActionToken: event.LifecycleActionToken, LifecycleActionResult: 'ABANDON'
       }).promise().catch(err => console.log(err));
-      await setDeploymentMember({InstanceId: event.EC2InstanceId, Status: REMOVING});
+      await recordInstanceInDDB(Object.assign(findInstanceInDeployment(event.EC2InstanceId, deployment), {Status: REMOVING}));
       break;
     default:
-      console.log(`Result of checking configuration state on instance could not be determined: ${jobStatus}`);
+      console.log(`Result of checking configuration state on instance could not be determined: ${status}`);
   }
 }
 
@@ -215,33 +221,31 @@ function getTaskStatusForInstance(InstanceId) {
 }
 
 
+
+
 /**
  * Get the deployment as marked in the database. Does not include items being REMOVED
  * @returns {Promise<{ PrimaryBroker: {}, BrokerList: [], GatewayList: [], WebAccessList: []}>}
  */
 async function getDeployment() {
-  console.log(`Getting Deployment information for deployment named: ${rdsDeploymentName}`);
-  const deploymentParam = await systemsManager.getParameter({Name: rdsDeploymentName, WithDecryption: true}).promise()
-    .catch(err => {
-      if (err.code === "ParameterNotFound") {
-        console.log("Deployment not set yet, setting up...");
-        const deployment = [];
-        //deployment has not been setup yet. Set it.
-        return systemsManager.putParameter({
-          Name: rdsDeploymentName,
-          Type: "String",
-          Value: JSON.stringify(deployment)
-        }).promise()
-          .then(() => {
-            //try again
-            return systemsManager.getParameter({Name: rdsDeploymentName}).promise();
-          });
-      } else {
-        throw err;
-      }
-    });
-  const deploymentList = JSON.parse(deploymentParam.Parameter.Value);
-  return deploymentList.reduce((acc, member) => {
+  const params = {TableName: managementTable,
+    //AttributesToGet: ["InstanceId", "Type", "Primary", "Status"],
+    // FilterExpression : 'Status != :removing',
+    // ExpressionAttributeValues : {':removing' : REMOVING},
+    ConsistentRead: true // force consistent read so we know we have latest updates in hand
+  };
+  const members = [];
+  let done = false;
+  while (!done) {
+    const data = await ddb.scan(params).promise();
+    members.push(...data.Items);
+    if (data.LastEvaluatedKey) {
+      params.ExclusiveStartKey = data.LastEvaluatedKey;
+    } else {
+      done = true;
+    }
+  }
+  return members.reduce((acc, member) => {
     if (!/remov/i.test(member.Status)) {
       switch (member.Type) {
         case BROKER:
@@ -269,111 +273,7 @@ async function getDeployment() {
 }
 
 
-/**
- * Grab the conch. Always expires in one minute.
- * @returns {Promise<string>}
- */
-async function grabConch() {
-  const conchToken = crypto.randomBytes(16).toString("hex");
-  let obtained = false;
-  while(!obtained) {
-    try {
-      const conch = await systemsManager.getParameter({Name: rdsDeploymentName + "-Conch"}).promise();
-      const [existingToken, expiration] = conch.Parameter.Value.split(",");
-      if (existingToken === conchToken) {
-        console.log(`Got conch! (token: ${conchToken}`);
-        obtained = true;
-        return conchToken;
-      } else if ((new Date(expiration) - new Date()) <= 0) {
-        // conch reservation has expired. remove.
-        console.log(`conch reservation for token ${existingToken} expired at ${expiration}. Releasing forcibly!`);
-        await systemsManager.deleteParameter({Name: rdsDeploymentName + "-Conch"}).promise();
-        await wait( 100 );
-      } else {
-        console.log("waiting for conch to become available....");
-        await wait(Math.random() + 1000);
-      }
-    } catch(err) {
-      if (err.code === "ParameterNotFound") {
-        // sets up expiration in 1 minute (shouldn't hold conch for longer than a few seconds,
-        // so this is to trap any dangling conch reservations)
-        const expirationTime = new Date((new Date()).getTime() + 60000);
-        console.log("Attempting to grab conch...")
-        try {
-          await systemsManager.putParameter({
-            Overwrite: false,
-            Name: rdsDeploymentName + "-Conch",
-            Type: "String",
-            Value: `${conchToken},${expirationTime.toISOString()}`
-          }).promise();
-        } catch(err2) {
-          // try again ...
-          console.log("Attempt to grab conch trumped. Will retry.");
-          await wait(Math.random() + 1000);
-        }
-      }
-    }
-  }
-}
 
-
-/**
- * Releases the conch specified by token. If conch reservation has expired, gracefully does nothing.
- * @param conchToken
- * @returns {Promise<void>}
- */
-async function releaseConch(conchToken) {
-  try {
-    console.log(`Attempting to release conch ${conchToken}`);
-    const conch = await systemsManager.getParameter({Name: rdsDeploymentName + "-Conch"}).promise();
-    const [existingToken] = conch.Parameter.Value.split(",");
-    if (existingToken === conchToken) {
-      await systemsManager.deleteParameter({Name: rdsDeploymentName + "-Conch"}).promise();
-      console.log(`Released conch with tokent ${conchToken}`);
-    } else {
-      console.log(`Conch with token ${conchToken} is not current. May have expired before being release and obtained by another process. Conch found was ${existingToken}`);
-    }
-  } catch (err) {
-    if (err.code === "ParameterNotFound") {
-      console.log(`Conch with token ${conchToken} looks to have expired before being released. May need to increase reservation time.`);
-      return Promise.resolve();
-    }
-    throw err;
-  }
-}
-
-
-/**
- * Get the deployment as marked in the database. Does not include items being REMOVED
- * @returns {Promise<{ PrimaryBroker: {}, BrokerList: [], GatewayList: [], WebAccessList: []}>}
- */
-async function setDeploymentMember(memberData) {
-  const conchToken = await grabConch();
-  const deployment = await getDeployment();
-  if (memberData.Type === BROKER &&
-      memberData.PrimaryBroker === true &&
-      deployment.PrimaryBroker &&
-      deployment.PrimaryBroker.InstanceId !== memberData.InstanceId) {
-      await releaseConch(conchToken);
-      throw Error("Attempting to add primary broker when we already have one!!!");
-  }
-  const existingMember = deployment.AllMembersList.find(inst => inst.InstanceId === memberData.InstanceId);
-  if (existingMember) {
-    Object.assign(existingMember, memberData);
-  } else {
-    deployment.AllMembersList.push(memberData);
-  }
-  const params = {
-    Name: rdsDeploymentName,
-    Overwrite: true,
-    Type: "String",
-    Value: JSON.stringify(deployment.AllMembersList)
-  };
-  await systemsManager.putParameter(params).promise();
-  await wait(100);
-  console.log(`Completed setting member data: ${JSON.stringify(memberData)}`);
-  await releaseConch(conchToken);
-}
 
 
 /**
@@ -396,21 +296,20 @@ async function addInstanceToDeployment(event, deployment) {
     console.log(`Deployment does not have a primary broker, so establishing this one as primary: ${InstanceId}`);
     let thisBrokerIsPrimary = false;
     try {
-      await setDeploymentMember({InstanceId, Type, PrimaryBroker: true, Status: NEW});
+      await recordInstanceInDDB({InstanceId, Type, PrimaryBroker: true, Status: NEW});
       const tempDeployment = await getDeployment();
       console.log(`When checking for RACE CONDITION, DEPLOYMENT IS: ${JSON.stringify(tempDeployment, null,2)}`);
       // if no error (getDeployment throws error if it encounters two primary brokers
       thisBrokerIsPrimary = true;
     } catch (err) {
       // set it back to not primary
-      await setDeploymentMember({InstanceId, Type, PrimaryBroker: false, Status: NEW});
+      await recordInstanceInDDB({InstanceId, Type, PrimaryBroker: false, Status: NEW});
       // get the deployment that should succeed with a single primary broker now.
       const tempDeployment = await getDeployment();
       console.log(`Encountered race condition for primary connection broker. 
               Backing off for instance ${InstanceId} and allowing instance ${tempDeployment.PrimaryBroker.InstanceId} to be primary`);
       // set primary to FALSE
       await wait(DEFAULT_DELAY);
-      await publishSNSMessage(event, snsTopicArn);
     }
     if (thisBrokerIsPrimary) {
       // THIS BROKER IS NOW PRIMARY
@@ -423,15 +322,15 @@ async function addInstanceToDeployment(event, deployment) {
     // Primary Broker exists and is configured
     switch (Type) {
       case GATEWAY:
-        await setDeploymentMember({InstanceId, Type, Status: NEW});
+        await recordInstanceInDDB({InstanceId, Type, Status: NEW});
         await initGatewayConfig(InstanceId, deployment.PrimaryBroker.InstanceId);
         break;
       case WEB:
-        await setDeploymentMember({InstanceId, Type, Status: NEW});
+        await recordInstanceInDDB({InstanceId, Type, Status: NEW});
         await initWebAccessConfig(InstanceId, deployment.PrimaryBroker.InstanceId);
         break;
       case BROKER:
-        await setDeploymentMember({InstanceId, Type, PrimaryBroker: false, Status: NEW});
+        await recordInstanceInDDB({InstanceId, Type, PrimaryBroker: false, Status: NEW});
         await initBrokerConfig(InstanceId, deployment.PrimaryBroker.InstanceId);
         break;
       default:
@@ -464,15 +363,15 @@ async function removeInstanceFromDeployment(event, deployment) {
   } else {
     switch (Type) {
       case GATEWAY:
-        await setDeploymentMember({InstanceId, Type, Status: REMOVING});
+        await recordInstanceInDDB({InstanceId, Type, Status: REMOVING});
         await initGatewayRemoval(InstanceId);
         break;
       case WEB:
-        await setDeploymentMember({InstanceId, Type, Status: REMOVING});
+        await recordInstanceInDDB({InstanceId, Type, Status: REMOVING});
         await initWebAccessRemoval(InstanceId);
         break;
       case BROKER:
-        await setDeploymentMember({InstanceId, Type, Status: REMOVING});
+        await recordInstanceInDDB({InstanceId, Type, Status: REMOVING});
         await initBrokerRemoval(InstanceId);
         break;
       default:
@@ -494,19 +393,20 @@ async function addWorkspaceToDeployment(event, deployment) {
 async function removeWorkspaceFromDeployment(event, deployment) {
   console.log(`Initiated removal of Workspace ${event.WorkspaceId} to deployment.`);
   await wait(DEFAULT_DELAY);
-  await publishSNSMessage(Object.assign({StatusCheck: true}, event), snsTopicArn);
+  await publishSNSMessage(Object.asign({StatusCheck: true}, event), snsTopicArn);
 
 }
 
-// /**
-//  * Records data for the instance in DynamoDB table
-//  * @param InstanceData
-//  * @returns {Promise<DocumentClient.PutItemOutput, AWSError>}
-//  */
-// function recordInstanceInDDB(InstanceData) {
-//   // crete or update the item in the table. Only supplied data values will be changed. Existing data will be preserved.
-//   return ddb.put({TableName: managementTable, Item: InstanceData}).promise();
-// }
+
+/**
+ * Records data for the instance in DynamoDB table
+ * @param InstanceData
+ * @returns {Promise<DocumentClient.PutItemOutput, AWSError>}
+ */
+function recordInstanceInDDB(InstanceData) {
+  // crete or update the item in the table. Only supplied data values will be changed. Existing data will be preserved.
+  return ddb.put({TableName: managementTable, Item: InstanceData}).promise();
+}
 
 
 /**
@@ -541,6 +441,7 @@ function publishSNSMessage(snsMessage,snsTopicArn) {
     });
 }
 
+
 async function initPrimaryBrokerConfig(instanceID) {
 
 }
@@ -557,6 +458,7 @@ async function initWebAccessConfig(instanceId) {
   //systemsManager.sendCommand({DocumentName: "RemoveGatewayFromRDS", InstanceIds: [PrimaryBrokerInstanceId]})
 
 }
+
 async function initPrimaryBrokerChange(instanceID) {
 
 }
@@ -582,9 +484,3 @@ async function initWebAccessRemoval(instanceId) {
 async function wait(ms) {
   return await new Promise((resolve)=>setTimeout(resolve, ms));
 }
-
-module.exports.wait = wait;
-module.exports.getDeployment = getDeployment;
-module.exports.setDeploymentMember = setDeploymentMember;
-module.exports.grabConch = grabConch;
-module.exports.releaseConch = releaseConch;

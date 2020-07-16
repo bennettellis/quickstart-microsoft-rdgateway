@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+Resources:
+  MakeBrokerPrimary:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: MakeBrokerPrimaryForRDDeployment
+      Content:
+        schemaVersion: "2.2"
+        description: >
+          Sets instance against which this runs as the primary connection broker. Requires that this instance has already
+          been connected as a broker to the deployment. If the primary connection broker is unavailable....
+        parameters:
+          PrimaryBroker:
+            type: "String"
+            description: "The FQDN of the Primary Connection Broker in the RDS Deployment"
+          UserNameSecretName:
+            type: "String"
+            description: "The name of the secret containing the username for the service account"
+          PwdSecretName:
+            type: "String"
+            description: "The name of the secret containing the password for the service account"
+        mainSteps:
+          - action: "aws:runPowerShellScript"
+            name: "set-primary-broker"
+            inputs:
+              runCommand:
+                - |
+                  Start-Transcript -Path c:\cfn\log\rds-management.log -Append
+                  $ErrorActionPreference = "Stop"
+                  Write-Output "Getting credentials from Secrets Manager..."
+                  $UserName = Get-SECSecretValue -SecretId {{UserNameSecretName}} -Select SecretString
+                  Write-Output "Service Account User is $UserName"
+                  $Password = Get-SECSecretValue -SecretId {{PwdSecretName}} -Select SecretString
+                  $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+                  $creds = New-Object System.Management.Automation.PSCredential -ArgumentList $UserName,$securePassword
+                  $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                  Write-Output "Modifying system to enable Credential Delegation for *.va.gov"
+                  Invoke-Command -ComputerName $ThisHost -Credential $creds -Scriptblock{
+                    $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                    New-Item -Path $NewKeyPath –Force
+                    Get-Item -Path $NewKeyPath | New-ItemProperty -Name AllowFreshCredentials -PropertyType "DWord"  -Value "1” –Force
+                    Get-Item -Path $NewKeyPath| New-ItemProperty -Name ConcatenateDefaults_AllowFresh -PropertyType "DWord" -Value "1” –Force
+                    New-Item -Path $NewKeyPath -Name "AllowFreshCredentials" –Force
+                    Get-Item -Path "$NewKeyPath\AllowFreshCredentials" | New-ItemProperty -Name "1" -Value "*.va.gov” –Force
+                  }
+                  Enable-WSManCredSSP -Role client -DelegateComputer $ThisHost -Force
+                  $ps = New-PSSession -ComputerName $ThisHost -Authentication CredSSP -Credential $creds
+                  Invoke-Command -Session $ps -Scriptblock {
+                     $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                     Write-Output "Adding Connection Broker $ThisHost to the RDS Deployment"
+                     $primaryBroker = (Get-RDConnectionBrokerHighAvailability -ConnectionBroker {{PrimaryBroker}}).ActiveManagementServer
+                     Write-Output "Primary broker is $primaryBroker"
+                     Add-RDServer -Server $ThisHost -Role "RDS-CONNECTION-BROKER" -ConnectionBroker $primaryBroker
+                     Write-Output "Modifying system to disable Credential Delegation for *.va.gov"
+                     $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                     Remove-Item -Path $NewKeyPath –Force -Recurse
+                  }
+                  Remove-PSSession $ps
+                  Write-Output "Finished executing command to add new broker."
+  AddConnectionBroker:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: AddConnectionBrokerToRDDeployment
+      Content:
+        schemaVersion: "2.2"
+        description: >
+          Adds Connection broker to already existing RD Deployment. If the primary connection broker specified is
+          unavailable...
+        parameters:
+          PrimaryBroker:
+            type: "String"
+            description: "The FQDN of the Primary Connection Broker in the RDS Deployment"
+          UserNameSecretName:
+            type: "String"
+            description: "The name of the secret containing the username for the service account"
+          PwdSecretName:
+            type: "String"
+            description: "The name of the secret containing the password for the service account"
+        mainSteps:
+          - action: "aws:runPowerShellScript"
+            name: "add-connection-broker"
+            inputs:
+              runCommand:
+                - |
+                  Start-Transcript -Path c:\cfn\log\rds-management.log -Append
+                  $ErrorActionPreference = "Stop"
+                  Write-Output "Getting credentials from Secrets Manager..."
+                  $UserName = Get-SECSecretValue -SecretId {{UserNameSecretName}} -Select SecretString
+                  Write-Output "Service Account User is $UserName"
+                  $Password = Get-SECSecretValue -SecretId {{PwdSecretName}} -Select SecretString
+                  $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+                  $creds = New-Object System.Management.Automation.PSCredential -ArgumentList $UserName,$securePassword
+                  $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                  Write-Output "Modifying system to enable Credential Delegation for *.va.gov"
+                  Invoke-Command -ComputerName $ThisHost -Credential $creds -Scriptblock{
+                    $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                    New-Item -Path $NewKeyPath –Force
+                    Get-Item -Path $NewKeyPath | New-ItemProperty -Name AllowFreshCredentials -PropertyType "DWord"  -Value "1” –Force
+                    Get-Item -Path $NewKeyPath| New-ItemProperty -Name ConcatenateDefaults_AllowFresh -PropertyType "DWord" -Value "1” –Force
+                    New-Item -Path $NewKeyPath -Name "AllowFreshCredentials" –Force
+                    Get-Item -Path "$NewKeyPath\AllowFreshCredentials" | New-ItemProperty -Name "1" -Value "*.va.gov” –Force
+                  }
+                  Enable-WSManCredSSP -Role client -DelegateComputer $ThisHost -Force
+                  $ps = New-PSSession -ComputerName $ThisHost -Authentication CredSSP -Credential $creds
+                  Invoke-Command -Session $ps -Scriptblock {
+                     $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                     Write-Output "Adding Connection Broker $ThisHost to the RDS Deployment"
+                     $primaryBroker = (Get-RDConnectionBrokerHighAvailability -ConnectionBroker {{PrimaryBroker}}).ActiveManagementServer
+                     Write-Output "Primary broker is $primaryBroker"
+                     Add-RDServer -Server $ThisHost -Role "RDS-CONNECTION-BROKER" -ConnectionBroker $primaryBroker
+                     Write-Output "Modifying system to disable Credential Delegation for *.va.gov"
+                     $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                     Remove-Item -Path $NewKeyPath –Force -Recurse
+                  }
+                  Remove-PSSession $ps
+                  Write-Output "Finished executing command to add new broker."
+  CreateRDDeployment:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Name: AddGatewayToRDDeployment
+      Content:
+        schemaVersion: "2.2"
+        description: "Command Document Example JSON Template"
+        parameters:
+          PrimaryBroker:
+            type: "String"
+            description: "The FQDN of the Primary Connection Broker in the RDS Deployment"
+          UserNameSecretName:
+            type: "String"
+            description: "The name of the secret containing the username for the service account"
+          PwdSecretName:
+            type: "String"
+            description: "The name of the secret containing the password for the service account"
+        mainSteps:
+          - action: "aws:runPowerShellScript"
+            name: "create-rd-deployment"
+            inputs:
+              runCommand:
+                - |
+                  Start-Transcript -Path c:\cfn\log\rds-management.log -Append
+                  $ErrorActionPreference = "Stop"
+                  Write-Output "Getting credentials from Secrets Manager..."
+                  $UserName = Get-SECSecretValue -SecretId {{UserNameSecretName}} -Select SecretString
+                  Write-Output "Service Account User is $UserName"
+                  $Password = Get-SECSecretValue -SecretId {{PwdSecretName}} -Select SecretString
+                  $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+                  $creds = New-Object System.Management.Automation.PSCredential -ArgumentList $UserName,$securePassword
+                  $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                  Write-Output "Modifying system to enable Credential Delegation for *.va.gov"
+                  Invoke-Command -ComputerName $ThisHost -Credential $creds -Scriptblock{
+                    $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                    New-Item -Path $NewKeyPath –Force
+                    Get-Item -Path $NewKeyPath | New-ItemProperty -Name AllowFreshCredentials -PropertyType "DWord"  -Value "1” –Force
+                    Get-Item -Path $NewKeyPath| New-ItemProperty -Name ConcatenateDefaults_AllowFresh -PropertyType "DWord" -Value "1” –Force
+                    New-Item -Path $NewKeyPath -Name "AllowFreshCredentials" –Force
+                    Get-Item -Path "$NewKeyPath\AllowFreshCredentials" | New-ItemProperty -Name "1" -Value "*.va.gov” –Force
+                  }
+                  Enable-WSManCredSSP -Role client -DelegateComputer $ThisHost -Force
+                  $ps = New-PSSession -ComputerName $ThisHost -Authentication CredSSP -Credential $creds
+                  Invoke-Command -Session $ps -Scriptblock {
+                     $ThisHost=[System.Net.Dns]::GetHostByName($env:computerName).HostName
+                     Write-Output "Adding Connection Broker $ThisHost to the RDS Deployment"
+                     $primaryBroker = (Get-RDConnectionBrokerHighAvailability -ConnectionBroker {{PrimaryBroker}}).ActiveManagementServer
+                     Write-Output "Primary broker is $primaryBroker"
+                     Add-RDServer -Server $ThisHost -Role "RDS-CONNECTION-BROKER" -ConnectionBroker $primaryBroker
+                     Write-Output "Modifying system to disable Credential Delegation for *.va.gov"
+                     $NewKeyPath="HKLM:HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CredentialsDelegation"
+                     Remove-Item -Path $NewKeyPath –Force -Recurse
+                  }
+                  Remove-PSSession $ps
+                  Write-Output "Finished executing command to add new broker."

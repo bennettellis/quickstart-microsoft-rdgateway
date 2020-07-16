@@ -5,6 +5,12 @@ Description: >-
   Windows instance and related resources. You will be billed for the AWS resources
   used if you create a stack from this template. QS(0006)
 Parameters:
+  DeploymentName:
+    Type: String
+    Description: A unique name for this RDS Deployment in this account. Make sure each deployment in the same account has a different DeploymentName value.
+    Default: RDSDeployment1
+    AllowedPattern: '[a-zA-Z0-9\-]{3,40}'
+    ConstraintDescription: Must be alpha-nueric (- dashes allowed) value between 3 and 40 characters.
   DomainDNSName:
     Description: Fully qualified domain name (FQDN) e.g. example.com
     Type: String
@@ -79,8 +85,9 @@ Parameters:
   RDSInstanceType:
     Description: Amazon EC2 instance type for the Remote Desktop Services instances
     Type: String
-    Default: t2.medium
+    Default: t2.micro
     AllowedValues:
+      - t2.micro
       - t2.small
       - t2.medium
       - t2.large
@@ -154,7 +161,7 @@ Parameters:
     Type: String
     Description: The ARN of the SNS Topic to notify when scaling actions occur for this component
     #TODO remove this
-    Default: "arn:aws:sns:us-east-1:322553608824:rds-notifications-NotificationTopic-5T3G18CZHSIX"
+    Default: "arn:aws:sns:us-east-1:322553608824:rds-notifications-ScalingAutomationNotificationTopic-8NB7OWQXCVWK"
 #  SQSQueueArn:
 #    Type: String
 #    Description: The ARN of the SQS queue to send scaling notifications to and listen for configuration actions on
@@ -162,7 +169,7 @@ Parameters:
 #  NotificationLambdaArn:
 #    Type: String
 #    Description: The ARN of the Lambda that will be notified for LifecycleHook activity, allowing the lambda to manage the deployment
-  LifecycleNotificationRole:
+  LifecycleNotificationRoleArn:
     Type: String
     Description: The ARN of the notification role that allows AutoScaling to send messages to SQS for Lifecycle Events.
     Default: "arn:aws:iam::322553608824:role/rds-roles-LifecycleNotificationRole-1FTNIT4YMFM9Y"
@@ -174,28 +181,15 @@ Parameters:
     Type: String
     Description: The name of the instance profile that will be assigned to each EC2 instance deployed in the solution.
     Default: rds-roles-HostProfile-4IZSDI524KBE
-Rules:
-  SubnetsInVPC:
-    Assertions:
-      - Assert: !EachMemberIn
-          - !ValueOfAll
-            - AWS::EC2::Subnet::Id
-            - VpcId
-          - !RefAll 'AWS::EC2::VPC::Id'
-        AssertDescription: All subnets must in the VPC
-  CheckSupportedInstances:
-    RuleCondition: !Contains
-      - - m4.large
-        - m4.xlarge
-        - m4.2xlarge
-        - m4.4xlarge
-      - !Ref 'RDSInstanceType'
-    Assertions:
-      - Assert: !Not
-          - !Contains
-            - - eu-west-3
-            - !Ref 'AWS::Region'
-        AssertDescription: M4 instances are not available in the Paris region
+#Rules:
+#  SubnetsInVPC:
+#    Assertions:
+#      - Assert: !EachMemberIn
+#          - !ValueOfAll
+#            - AWS::EC2::Subnet::Id
+#            - VpcId
+#          - !RefAll 'AWS::EC2::VPC::Id'
+#        AssertDescription: All subnets must in the VPC
 Conditions:
   UsingDefaultBucket: !Equals [!Ref S3BucketName, 'aws-quickstart']
   RDSConnectionBrokerComponent: !Equals [!Ref RDComponentToDeploy, 'RDS-Connection-Broker']
@@ -247,13 +241,13 @@ Resources:
           LifecycleHookName: !Sub "${RDComponentToDeploy}-LAUNCHING"
           HeartbeatTimeout: 1200  # 20 minutes
           NotificationTargetARN: !Ref SNSNotificationTopicArn
-          RoleARN: !Ref LifecycleNotificationRole
+          RoleARN: !Ref LifecycleNotificationRoleArn
           DefaultResult: ABANDON
         - LifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING"
           LifecycleHookName: !Sub "${RDComponentToDeploy}-TERMINATING"
           HeartbeatTimeout: 300  # 5 minutes
           NotificationTargetARN: !Ref SNSNotificationTopicArn
-          RoleARN: !Ref LifecycleNotificationRole
+          RoleARN: !Ref LifecycleNotificationRoleArn
           DefaultResult: CONTINUE
     CreationPolicy:
       ResourceSignal:
@@ -279,11 +273,12 @@ Resources:
           config:
             - setup
             - join
+            - setRDSTags
             - restarts
-            - installCert
-            - installRDS
-            - installSQLDriver
-            - restarts
+#            - installCert
+#            - installRDS
+#            - installSQLDriver
+#            - restarts
             - finalize
         setup:
           files:
@@ -358,6 +353,12 @@ Resources:
                 - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
                   S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
               authentication: S3AccessCreds
+            c:\cfn\scripts\Set-RDSTags.ps1:
+              source: !Sub
+                - https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${S3KeyPrefix}scripts/Set-RDSTags.ps1
+                - S3Region: !If [UsingDefaultBucket, !Sub '${AWS::Region}', !Ref S3BucketRegion]
+                  S3Bucket: !If [UsingDefaultBucket, !Sub '${S3BucketName}-${AWS::Region}', !Ref S3BucketName]
+              authentication: S3AccessCreds
           services:
             windows:
               cfn-hup:
@@ -416,6 +417,12 @@ Resources:
                   - Fn::Sub: >
                       powershell.exe -Command "C:\cfn\scripts\Install-SQLServerNativeClient.ps1"
                   - powershell.exe -Command "echo 'Not installing SQL Server Native Client. Only installed on connection broker instances.'"
+              waitAfterCompletion: '0'
+        setRDSTags:
+          commands:
+            a-set-tags:
+              command: !Sub >
+                powershell.exe -Command "C:\cfn\scripts\Set-RDSTags.ps1 -DeploymentName ${DeploymentName}"
               waitAfterCompletion: '0'
         restarts:
           commands:

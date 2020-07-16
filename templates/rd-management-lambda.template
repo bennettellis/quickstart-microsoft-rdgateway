@@ -18,7 +18,7 @@ Metadata:
       - Label:
           default: Input Source
         Parameters:
-          - SNSTopic
+          - SNSTopicArn
 #          - SQSQueueUri
       - Label:
           default: Lambda Details
@@ -50,7 +50,7 @@ Parameters:
 #  SQSQueueArn:
 #    Type: String
 #    Description: The ARN of the SQS Queue that this Lambda solution will trigger from
-  SNSTopic:
+  SNSTopicArn:
     Type: String
     Description: The ARN of the SNS Topic
   RDSComponentManagementDDBTableName:
@@ -164,6 +164,14 @@ Resources:
                   - dynamodb:DeleteItem
                 Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RDSComponentManagementDDBTableName}"
                 Effect: Allow
+        - PolicyName: PublishToSNS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - sns:Publish
+                Resource: !Ref SNSTopicArn
+                Effect: Allow
   #  WorkspacesLambdaSG:
 #    Type: AWS::EC2::SecurityGroup
 #    Properties:
@@ -226,4 +234,4 @@ Resources:
       FunctionName: !Ref RemoteDesktopDeploymentManagerLambda
       Action: "lambda:InvokeFunction"
       Principal: sns.amazonaws.com
-      SourceArn: !Ref SNSTopic
+      SourceArn: !Ref SNSTopicArn

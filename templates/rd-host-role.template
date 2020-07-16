@@ -132,6 +132,14 @@ Resources:
                   - 'logs:DescribeLogGroups'
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:*:log-group:/aws/ec2/*:log-stream:*'
+        - PolicyName: EC2Access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateTags'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:*:instance/*'
       # Path: /vaec/
       Path: /
       AssumeRolePolicyDocument:
